@@ -10,7 +10,8 @@ python -m pytest -q
 python -m compileall -q main.py music commands config moderation voice ui
 ```
 
-La suite `tests/test_music_v11.py` valida con mocks:
+Las suites `tests/test_music_v11.py` y `tests/test_music_premium.py` validan con
+mocks:
 
 - PLAY individual, PLAY concurrente y FIFO de varios solicitantes.
 - Duplicados de una misma interacción.
@@ -19,9 +20,13 @@ La suite `tests/test_music_v11.py` valida con mocks:
 - SKIP con refresco y rechazo de eventos atrasados.
 - Prioridad de cola manual sobre AUTOPLAY y resultados tardíos invalidados.
 - Permisos de miembro, administrador y bot.
-- Los nueve controles reales del panel, ayuda y reutilización de un mensaje.
-- Recuperación de la referencia del panel tras reinicio.
-- Interrupción/restauración de música por TTS.
+- Components V2, portada, títulos, siguiente canción y nueve controles reales.
+- Panel único incluso con tres solicitudes `/player` simultáneas.
+- Recuperación y conversión del panel persistente tras reinicio.
+- Actualización automática por eventos y estados sin reproducción.
+- Confirmaciones compactas de PLAY sin embeds repetidos.
+- PLAY, SKIP y STOP mientras TTS posee el canal.
+- Restauración de música reproducida o pausada y fallo de restauración TTS.
 - Aislamiento de varios servidores y reconexión de voz simulada.
 
 Los scripts históricos se ejecutan como módulos, por ejemplo:
@@ -59,3 +64,8 @@ En un servidor de pruebas donde el propietario haya autorizado al bot:
    volumen percibido, cortes o artefactos.
 
 No ejecutar estas pruebas en comunidades ajenas ni crear servidores nuevos.
+
+## GitHub Actions
+
+`.github/workflows/music-tests.yml` ejecuta compilación, `pip check` y toda la
+suite en Python 3.11 y 3.12 para cada actualización del PR y de la rama musical.

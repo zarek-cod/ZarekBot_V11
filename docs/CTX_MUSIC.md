@@ -34,13 +34,28 @@ autoplay siga activo y que no haya aparecido música manual.
 
 ## Panel principal
 
-`/player` crea como máximo un mensaje principal por servidor. Las referencias
-se guardan en `data/music_panels.json` (archivo local ignorado por Git). En el
-siguiente arranque se valida que canal y mensaje sigan existiendo y se vuelve a
-registrar la View persistente.
+`/player` crea como máximo un mensaje principal por servidor. Un lock cubre la
+búsqueda, creación y persistencia para que varias interacciones simultáneas no
+dupliquen el mensaje. Las referencias se guardan en `data/music_panels.json`
+(archivo local ignorado por Git). En el siguiente arranque se valida que canal
+y mensaje sigan existiendo y se vuelve a registrar la View persistente.
+
+El mensaje principal utiliza Discord Components V2 mediante `LayoutView`:
+
+- `Container` con acento carmesí y fondo nativo del cliente.
+- `MediaGallery` para que la portada original sea el elemento dominante.
+- `TextDisplay` y `Separator` para jerarquía compacta en móvil y escritorio.
+- Tres `ActionRow` con nueve botones reales y estados dinámicos.
+
+Components V2 no permite mezclar el mensaje con embeds o contenido tradicional.
+Al recuperar un panel antiguo, CTX lo convierte una sola vez eliminando su embed
+y conservando el mismo mensaje. El negro depende del tema oscuro del cliente;
+Discord no permite fijar un color de fondo arbitrario.
 
 Los cambios se agrupan con debounce. Mientras una canción avanza, el panel se
-edita cada 15 segundos; no se edita cada segundo para evitar rate limits.
+edita cada 15 segundos; no se edita cada segundo para evitar rate limits. Los
+intervalos pueden ajustarse con `CTX_MUSIC_PANEL_DEBOUNCE_SECONDS` y
+`CTX_MUSIC_PANEL_REFRESH_SECONDS`, dentro de límites seguros.
 
 ## Permisos
 
@@ -62,11 +77,17 @@ estado según corresponda. Duraciones desconocidas muestran `--:--`.
 Discord solo admite una fuente por `VoiceClient`. Antes de TTS:
 
 1. Edge TTS genera el archivo; si falla, la música nunca se toca.
-2. El backend marca la generación como interrupción externa.
-3. Se libera la fuente musical sin emitir FINISHED/STOPPED.
-4. TTS usa el canal.
-5. En `finally`, se refresca el stream y se reinicia aproximadamente en la
+2. La sesión TTS obtiene el mismo lock de operaciones musicales del servidor.
+3. El backend marca la generación como interrupción externa.
+4. Se libera la fuente musical sin emitir FINISHED/STOPPED.
+5. TTS conserva la propiedad exclusiva del `VoiceClient` hasta terminar.
+6. Antes de liberar el lock se refresca el stream y se reinicia aproximadamente en la
    posición congelada. Si la canción ya estaba pausada, vuelve a quedar pausada.
+
+PLAY, SKIP y STOP solicitados durante TTS esperan el fin de esa sesión y luego
+se ejecutan en orden. Los locks son por servidor, por lo que dos servidores no
+se bloquean entre sí. Si la restauración falla, se elimina la pista actual
+inconsistente y el panel informa el error.
 
 Las órdenes diagnósticas de tono no pueden ejecutarse mientras CTX Music tiene
 una canción activa.

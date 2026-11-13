@@ -14,10 +14,12 @@ loop, controles jerárquicos, panel persistente y convivencia segura con TTS.
   canción manual cuando falla una reproducción.
 - Historial y pool limitado de recomendaciones, cooldown anti-bot y
   cancelación por generación para resultados atrasados.
-- Panel único por servidor, restaurable tras reinicio, con portada, cola,
-  modos, botones reales y progreso aproximado.
+- Panel premium único por servidor con Discord Components V2: Container
+  carmesí, portada grande mediante Media Gallery, jerarquía compacta y nueve
+  controles persistentes que reflejan el estado real.
 - Locks independientes por servidor y protección de interacciones duplicadas.
-- Interrupción coordinada Music/TTS sin convertir TTS en un fin de canción.
+- Propiedad exclusiva del `VoiceClient` durante toda la intervención TTS;
+  PLAY, SKIP y STOP se serializan por servidor sin bloquear otros servidores.
 
 La barra de progreso usa un reloj monotónico local. Se congela durante pausa y
 TTS, pero es **aproximada**: Discord/FFmpeg no exponen una posición de
