@@ -34,6 +34,8 @@ from music.runtime import (
 
     get_music_runtime_summary,
 
+    reset_music_runtime,
+
 )
 
 from music.autoplay_recommendations import (
@@ -42,7 +44,18 @@ from music.autoplay_recommendations import (
 
     get_autoplay_recommendations_summary,
 
+    unregister_autoplay_recommendations,
+
 )
+
+from music.audio_priority import (
+    begin_tts_interruption,
+    finish_tts_interruption,
+)
+
+from music.permissions import can_manage_music
+
+from music.session import music_session_manager
 
 # --- 1. CONFIGURACIÓN Y MULTI-API ---
 
@@ -52,7 +65,9 @@ load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-CANAL_VOZ_ID = 1401959640287154180
+CANAL_VOZ_ID = int(os.getenv("CANAL_VOZ_ID", "0") or 0)
+
+BOT_PREFIX = os.getenv("BOT_PREFIX", "!").strip() or "!"
 
 
 
@@ -332,9 +347,9 @@ NUNCA, BAJO NINGUNA CIRCUNSTANCIA, digas que eres una Inteligencia Artificial, u
 
 TU PERSONALIDAD Y LENGUAJE (HUMANO, VULGAR Y ARROGANTE):
 
-\- Escribe exactamente como hablas. Usa muletillas y pausas: "Mmm...", "Ehhh...", "A ver...", "Ufff...", "Tsk...". 
+- Escribe exactamente como hablas. Usa muletillas y pausas: "Mmm...", "Ehhh...", "A ver...", "Ufff...", "Tsk...".
 
-\- Usa un arsenal de lenguaje coloquial y vulgar combinando:
+- Usa un arsenal de lenguaje coloquial y vulgar combinando:
 
   * PERÚ: escoria, gil, mierda, huevón, manco, basura, ctm, pt, carajo, reconchatumadre, baboso.
 
@@ -422,7 +437,7 @@ intents.members = True
 
 bot = commands.Bot(
 
-    command_prefix="!",
+    command_prefix=BOT_PREFIX,
 
     intents=intents,
 
@@ -1339,6 +1354,10 @@ async def hablar_texto(guild, canal_texto, texto):
 
     async with cola_de_voz_lock: 
 
+        interrupcion_musical = None
+
+        archivo_audio = None
+
         try:
 
             ruta_ffmpeg = os.path.abspath("ffmpeg.exe")
@@ -1398,8 +1417,15 @@ async def hablar_texto(guild, canal_texto, texto):
             await comunicador.save(archivo_audio)
 
 
+            interrupcion_musical = await begin_tts_interruption(guild.id)
 
-            while voice_client.is_playing(): await asyncio.sleep(0.5)
+            for _ in range(20):
+
+                if not voice_client.is_playing() and not voice_client.is_paused():
+
+                    break
+
+                await asyncio.sleep(0.05)
 
 
 
@@ -1413,11 +1439,37 @@ async def hablar_texto(guild, canal_texto, texto):
 
 
 
-            if os.path.exists(archivo_audio): os.remove(archivo_audio)
-
         except Exception as e:
 
-            pass
+            print(
+                "⚠️ [CTX VOICE] No se pudo reproducir TTS:",
+                type(e).__name__,
+            )
+
+        finally:
+
+            if archivo_audio and os.path.exists(archivo_audio):
+
+                try:
+
+                    os.remove(archivo_audio)
+
+                except OSError:
+
+                    pass
+
+            if interrupcion_musical is not None:
+
+                try:
+
+                    await finish_tts_interruption(interrupcion_musical)
+
+                except Exception as error:
+
+                    print(
+                        "⚠️ [CTX VOICE] No se pudo restaurar CTX Music:",
+                        type(error).__name__,
+                    )
 
 
 
@@ -2307,7 +2359,7 @@ async def preguntar_gemini(ctx, *, pregunta: str = None):
 
 
 
-        embed.add_field(name="💡 Centro de Comandos", value="Usa \`!ctx_reset\` para borrar tu memoria.\nJuegos: \`!ctx_ruleta\`, \`!ctx_dado\`, \`!ctx_moneda\`.\nVoz: \`!ctx_voz\` | \`!ctx_salir\`", inline=False)
+        embed.add_field(name="💡 Centro de Comandos", value="Usa `!ctx_reset` para borrar tu memoria.\nJuegos: `!ctx_ruleta`, `!ctx_dado`, `!ctx_moneda`.\nVoz: `!ctx_voz` | `!ctx_salir`", inline=False)
 
         embed.set_footer(text=f"Consulta de {nombre_usuario} ({rol_principal}) • Creado por ZAREK", icon_url=ctx.author.avatar.url if ctx.author.avatar else None)
 
@@ -2763,39 +2815,39 @@ async def ctx_audioestado(ctx):
 
 
 
-        f"🔌 Conectado: \`{voice_client.is_connected()}\`\n"
+        f"🔌 Conectado: `{voice_client.is_connected()}`\n"
 
-        f"▶️ Reproduciendo: \`{voice_client.is_playing()}\`\n"
+        f"▶️ Reproduciendo: `{voice_client.is_playing()}`\n"
 
-        f"⏸️ Pausado: \`{voice_client.is_paused()}\`\n\n"
+        f"⏸️ Pausado: `{voice_client.is_paused()}`\n\n"
 
 
 
-        f"👑 Administrador: \`{permissions.administrator}\`\n"
+        f"👑 Administrador: `{permissions.administrator}`\n"
 
-        f"🔗 Conectar: \`{permissions.connect}\`\n"
+        f"🔗 Conectar: `{permissions.connect}`\n"
 
-        f"🗣️ Hablar: \`{permissions.speak}\`\n"
+        f"🗣️ Hablar: `{permissions.speak}`\n"
 
         f"🎙️ Actividad de voz: "
 
-        f"\`{permissions.use_voice_activation}\`\n\n"
+        f"`{permissions.use_voice_activation}`\n\n"
 
 
 
-        f"🔇 Server mute: \`{server_mute}\`\n"
+        f"🔇 Server mute: `{server_mute}`\n"
 
-        f"🔕 Server deaf: \`{server_deaf}\`\n"
+        f"🔕 Server deaf: `{server_deaf}`\n"
 
-        f"🎤 Self mute: \`{self_mute}\`\n"
+        f"🎤 Self mute: `{self_mute}`\n"
 
-        f"🎧 Self deaf: \`{self_deaf}\`\n"
+        f"🎧 Self deaf: `{self_deaf}`\n"
 
-        f"🚫 Suppress: \`{suppress}\`\n\n"
+        f"🚫 Suppress: `{suppress}`\n\n"
 
 
 
-        f"🔊 Opus: \`{opus_loaded}\`"
+        f"🔊 Opus: `{opus_loaded}`"
 
     )
 
@@ -2874,6 +2926,18 @@ async def ctx_tono(ctx):
         )
 
 
+
+        return
+
+    if not isinstance(ctx.author, discord.Member) or not can_manage_music(ctx.author):
+
+        await ctx.send("⛔ No tienes permiso para usar pruebas de audio.")
+
+        return
+
+    if music_session_manager.get_session(ctx.guild.id).current_track is not None:
+
+        await ctx.send("⛔ Detén CTX Music antes de ejecutar esta prueba de audio.")
 
         return
 
@@ -3468,6 +3532,18 @@ async def ctx_ffmpegtono(ctx):
         )
 
 
+
+        return
+
+    if not isinstance(ctx.author, discord.Member) or not can_manage_music(ctx.author):
+
+        await ctx.send("⛔ No tienes permiso para usar pruebas de audio.")
+
+        return
+
+    if music_session_manager.get_session(ctx.guild.id).current_track is not None:
+
+        await ctx.send("⛔ Detén CTX Music antes de ejecutar esta prueba de audio.")
 
         return
 
@@ -4329,4 +4405,12 @@ async def ctx_ffmpegtono(ctx):
 
 keep_alive()
 
-bot.run(DISCORD_TOKEN)
+try:
+
+    bot.run(DISCORD_TOKEN)
+
+finally:
+
+    unregister_autoplay_recommendations()
+
+    reset_music_runtime()

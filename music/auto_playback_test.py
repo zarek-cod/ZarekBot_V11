@@ -136,6 +136,8 @@ async def run_auto_playback_test() -> dict:
         requester_id=1,
         requester_name="Zarek",
         guild_id=guild_id,
+        stream_url="https://example.com/one.mp3",
+        source="direct",
     )
 
 
@@ -145,6 +147,8 @@ async def run_auto_playback_test() -> dict:
         requester_id=1,
         requester_name="Zarek",
         guild_id=guild_id,
+        stream_url="https://example.com/two.mp3",
+        source="direct",
     )
 
 
@@ -312,6 +316,8 @@ if __name__ == "__main__":
     result = asyncio.run(
         run_auto_playback_test()
     )
+
+    assert result["automatic_change_worked"], result
 
     print(
         result

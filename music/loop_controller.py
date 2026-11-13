@@ -29,8 +29,13 @@ from dataclasses import dataclass
 from music.session import (
     music_session_manager,
 )
+from music.operation_lock import get_guild_operation_lock
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -76,9 +81,7 @@ def _get_loop_lock(
 
     if guild_id not in _loop_locks:
 
-        _loop_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _loop_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _loop_locks[
@@ -159,6 +162,12 @@ async def enable_loop(
 
         session.state.enable_loop()
 
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.LOOP_CHANGED,
+            track=track,
+        )
+
 
         return LoopResult(
             success=True,
@@ -221,6 +230,12 @@ async def disable_loop(
 
         session.state.disable_loop()
 
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.LOOP_CHANGED,
+            track=track,
+        )
+
 
         return LoopResult(
             success=True,
@@ -269,6 +284,12 @@ async def toggle_loop(
 
         enabled = (
             session.toggle_loop()
+        )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.LOOP_CHANGED,
+            track=track,
         )
 
 
@@ -320,8 +341,6 @@ def get_loop_controller_summary() -> dict:
         "concurrent_loop_protection":
             True,
 
-        # Todavía falta conectar LOOP
-        # con AutoAdvance.
         "real_track_repeat":
-            False,
+            True,
     }

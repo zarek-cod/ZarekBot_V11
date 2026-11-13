@@ -89,6 +89,8 @@ async def run_loop_test() -> dict:
         title="Cancion LOOP",
         query="loop",
         guild_id=guild_id,
+        stream_url="https://example.com/loop.mp3",
+        source="direct",
     )
 
 
@@ -96,6 +98,8 @@ async def run_loop_test() -> dict:
         title="Cancion SIGUIENTE",
         query="next",
         guild_id=guild_id,
+        stream_url="https://example.com/next.mp3",
+        source="direct",
     )
 
 
@@ -227,8 +231,6 @@ async def run_loop_test() -> dict:
 
 if __name__ == "__main__":
 
-    print(
-        asyncio.run(
-            run_loop_test()
-        )
-    )
+    result = asyncio.run(run_loop_test())
+    assert result["loop_worked"], result
+    print(result)

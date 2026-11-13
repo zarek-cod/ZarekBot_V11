@@ -37,6 +37,11 @@ from music.session import (
     music_session_manager,
 )
 
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
+
 
 # ============================================================
 # ESTADO
@@ -102,6 +107,13 @@ def _event_matches_current_track(
     )
 
 
+def event_matches_current_track(event: PlaybackEvent) -> bool:
+    """Public stale-event guard shared by the automatic playback listeners."""
+
+    session = music_session_manager.get_session(event.guild_id)
+    return _event_matches_current_track(session, event)
+
+
 # ============================================================
 # FINISHED
 # ============================================================
@@ -155,6 +167,12 @@ def _handle_finished(
 
     player.status = (
         PlayerStatus.IDLE
+    )
+
+    emit_music_state_event(
+        event.guild_id,
+        MusicStateEventType.TRACK_ENDED,
+        track=event.track,
     )
 
 
@@ -213,6 +231,12 @@ def _handle_stopped(
         PlayerStatus.STOPPED
     )
 
+    emit_music_state_event(
+        event.guild_id,
+        MusicStateEventType.STOPPED,
+        track=event.track,
+    )
+
 
 # ============================================================
 # ERROR
@@ -267,6 +291,13 @@ def _handle_error(
 
     player.status = (
         PlayerStatus.IDLE
+    )
+
+    emit_music_state_event(
+        event.guild_id,
+        MusicStateEventType.PLAYBACK_ERROR,
+        track=event.track,
+        notice=(str(event.error) if event.error else None),
     )
 
 

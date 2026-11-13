@@ -26,12 +26,17 @@ from dataclasses import dataclass
 from music.backend_manager import (
     playback_backend_manager,
 )
+from music.operation_lock import get_guild_operation_lock
 
 from music.session import (
     music_session_manager,
 )
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -77,9 +82,7 @@ def _get_volume_lock(
 
     if guild_id not in _volume_locks:
 
-        _volume_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _volume_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _volume_locks[
@@ -214,7 +217,7 @@ async def set_music_volume(
         # ÉXITO
         # ====================================================
 
-        return VolumeResult(
+        result = VolumeResult(
             success=True,
             requested_volume=requested_volume,
             final_volume=final_volume,
@@ -224,6 +227,13 @@ async def set_music_volume(
                 f"establecido en {final_volume}%."
             ),
         )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.VOLUME_CHANGED,
+            track=session.current_track,
+        )
+        return result
 
 
 # ============================================================

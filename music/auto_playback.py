@@ -41,6 +41,8 @@ from music.async_scheduler import (
     schedule_coroutine,
 )
 
+from music.auto_advance import was_event_prepared
+
 from music.playback_events import (
     PlaybackEvent,
     PlaybackEventType,
@@ -52,12 +54,20 @@ from music.player import (
     music_player_manager,
 )
 
+from music.operation_lock import get_guild_operation_lock
+
+
 from music.session import (
     music_session_manager,
 )
 
 from music.stream_refresher import (
     refresh_track_stream,
+)
+
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
 )
 
 
@@ -98,7 +108,7 @@ _refresh_failures = 0
 # INICIAR CANCIÓN PREPARADA
 # ============================================================
 
-async def start_prepared_track(
+async def _start_prepared_track_unlocked(
     guild_id: int
 ) -> bool:
     """
@@ -283,6 +293,11 @@ async def start_prepared_track(
 
     _refresh_successes += 1
 
+    # A stop, skip, or manual play may have changed the selected track while
+    # yt-dlp refreshed the URL.  Never let that delayed result take over.
+    if session.current_track is not track:
+        return False
+
 
     # ========================================================
     # OBTENER BACKEND
@@ -308,6 +323,17 @@ async def start_prepared_track(
 
 
         return False
+
+    if not backend.is_connected:
+        channel_id = track.voice_channel_id
+        if channel_id is None:
+            _start_failures += 1
+            return False
+        connect_result = await backend.connect(channel_id)
+        if not connect_result.success:
+            _start_failures += 1
+            return False
+        session.mark_connected()
 
 
     # ========================================================
@@ -352,6 +378,10 @@ async def start_prepared_track(
 
         return False
 
+    if session.current_track is not track:
+        _start_failures += 1
+        return False
+
 
     # ========================================================
     # SINCRONIZAR SESIÓN
@@ -375,8 +405,21 @@ async def start_prepared_track(
 
     _tracks_started += 1
 
+    emit_music_state_event(
+        guild_id,
+        MusicStateEventType.TRACK_STARTED,
+        track=track,
+    )
+
 
     return True
+
+
+async def start_prepared_track(guild_id: int) -> bool:
+    """Serialize automatic starts with play, skip, stop, and control actions."""
+
+    async with get_guild_operation_lock(guild_id):
+        return await _start_prepared_track_unlocked(guild_id)
 
 
 # ============================================================
@@ -402,11 +445,14 @@ def handle_auto_playback_event(
     global _start_tasks_created
 
 
-    if (
-        event.event_type
-        != PlaybackEventType.FINISHED
-    ):
+    if event.event_type not in {
+        PlaybackEventType.FINISHED,
+        PlaybackEventType.ERROR,
+    }:
 
+        return
+
+    if not was_event_prepared(event):
         return
 
 

@@ -24,6 +24,10 @@ from music.session import (
 )
 from music.track import Track
 from music.track_factory import create_track_from_source
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -122,11 +126,18 @@ def enqueue_source(
 
         session.move_to_next()
 
-        return EnqueueResult(
+        result = EnqueueResult(
             track=track,
             position=0,
             started_immediately=True,
         )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.QUEUE_CHANGED,
+            track=track,
+        )
+        return result
 
 
     # --------------------------------------------------------
@@ -138,11 +149,18 @@ def enqueue_source(
     )
 
 
-    return EnqueueResult(
+    result = EnqueueResult(
         track=track,
         position=position,
         started_immediately=False,
     )
+
+    emit_music_state_event(
+        guild_id,
+        MusicStateEventType.QUEUE_CHANGED,
+        track=track,
+    )
+    return result
 
 
 # ============================================================

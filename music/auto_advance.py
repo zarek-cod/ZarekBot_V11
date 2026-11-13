@@ -34,6 +34,10 @@ from music.player import (
     music_player_manager,
 )
 
+from music.playback_event_handler import (
+    event_matches_current_track,
+)
+
 from music.session import (
     music_session_manager,
 )
@@ -69,6 +73,8 @@ _last_prepared_track: dict[
     int,
     Track
 ] = {}
+
+_last_prepared_event: dict[int, PlaybackEvent] = {}
 
 
 # ============================================================
@@ -219,11 +225,14 @@ def handle_auto_advance_event(
     global _finished_received
 
 
-    if (
-        event.event_type
-        != PlaybackEventType.FINISHED
-    ):
+    if event.event_type not in {
+        PlaybackEventType.FINISHED,
+        PlaybackEventType.ERROR,
+    }:
 
+        return
+
+    if not event_matches_current_track(event):
         return
 
 
@@ -232,8 +241,14 @@ def handle_auto_advance_event(
 
     prepare_next_track(
         guild_id=event.guild_id,
-        finished_track=event.track,
+        finished_track=(
+            event.track
+            if event.event_type == PlaybackEventType.FINISHED
+            else None
+        ),
     )
+
+    _last_prepared_event[event.guild_id] = event
 
 
 # ============================================================
@@ -290,6 +305,12 @@ def get_last_prepared_track(
     return _last_prepared_track.get(
         guild_id
     )
+
+
+def was_event_prepared(event: PlaybackEvent) -> bool:
+    """Return whether AutoAdvance accepted this exact terminal event."""
+
+    return _last_prepared_event.get(event.guild_id) is event
 
 
 # ============================================================

@@ -71,6 +71,8 @@ from music.discord_backend import (
 from music.playback_backend import (
     PlaybackBackend,
 )
+from music.operation_lock import reset_operation_locks
+from music.playback_clock import playback_clock_manager
 
 from music.playback_event_handler import (
     is_playback_event_handler_registered,
@@ -315,6 +317,9 @@ def reset_music_runtime() -> None:
     # ========================================================
 
     reset_async_scheduler()
+
+    reset_operation_locks()
+    playback_clock_manager.clear()
 
 
     # ========================================================
