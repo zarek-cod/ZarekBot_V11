@@ -1,0 +1,63 @@
+# Entorno virtual
+.venv/
+
+# Variables privadas
+.env
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# Archivos temporales
+*.tmp
+*.temp
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Secretos locales (conservar solo la plantilla publica)
+.env.*
+!.env.example
+
+# Entornos, pruebas y cobertura
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Estado de ejecucion y referencias persistentes de Discord
+data/music_panels.json
+data/*.tmp
+
+# Audio temporal y binarios locales (FFmpeg se instala por separado)
+*.mp3
+*.wav
+*.pcm
+*.opus
+*.ogg
+*.m4a
+*.webm
+*.exe*
+ffmpeg*
+
+# Copias y material de trabajo local
+main_backup*.py
+*_backup.py
+*.bak
+CTX_MUSIC_UI.txt
+
+# Otros editores y sistema operativo
+.idea/
+*.swp
+desktop.ini

@@ -1,0 +1,7 @@
+discord.py[voice]
+google-generativeai
+flask
+Pillow
+PyNaCl
+edge-tts
+python-dotenv
