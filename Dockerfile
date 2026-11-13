@@ -1,5 +1,5 @@
 # Usamos una versión ligera y rápida de Python
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 # Le ordenamos a la máquina virtual que instale el FFmpeg de Linux
 RUN apt-get update && apt-get install -y ffmpeg
