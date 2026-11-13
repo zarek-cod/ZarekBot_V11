@@ -32,7 +32,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from music.permissions import (
-    can_manage_music,
+    is_real_music_member,
 )
 
 from music.queue_controller import (
@@ -71,7 +71,7 @@ def can_use_queue_command(
         music.permissions
     """
 
-    return can_manage_music(
+    return is_real_music_member(
         member
     )
 
@@ -512,7 +512,7 @@ def get_queue_command_summary() -> dict:
         "uses_queue_controller":
             True,
 
-        "manage_music_permission":
+        "available_to_real_members":
             True,
 
         "shows_current_track":

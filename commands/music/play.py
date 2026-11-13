@@ -199,6 +199,7 @@ async def _execute_play(
     guild_id: int,
     member: discord.Member,
     query: str,
+    request_id: str | int | None = None,
 ) -> PlayRequestResult:
     """
     Núcleo compartido por:
@@ -245,6 +246,24 @@ async def _execute_play(
             ),
         )
 
+    existing_voice = member.guild.voice_client
+    if (
+        existing_voice is not None
+        and existing_voice.is_connected()
+        and existing_voice.channel is not None
+        and existing_voice.channel.id != voice_channel_id
+    ):
+        return PlayRequestResult(
+            success=False,
+            track=None,
+            started=False,
+            queued=False,
+            position=None,
+            connected=True,
+            stream_ready=False,
+            message="Debes estar en el mismo canal de voz que CTX.",
+        )
+
 
     # ========================================================
     # PLAY CONTROLLER
@@ -261,6 +280,7 @@ async def _execute_play(
         requester_id=member.id,
 
         requester_name=member.display_name,
+        request_id=request_id,
     )
 
 
@@ -369,6 +389,7 @@ class MusicPlayCommands(
                 member=ctx.author,
 
                 query=query,
+                request_id=ctx.message.id,
             )
 
 
@@ -492,6 +513,7 @@ class MusicPlayCommands(
             member=interaction.user,
 
             query=query,
+            request_id=interaction.id,
         )
 
 
