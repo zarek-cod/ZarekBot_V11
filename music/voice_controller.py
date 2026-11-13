@@ -27,6 +27,7 @@ from music.backend_manager import (
 from music.session import (
     music_session_manager,
 )
+from music.state_events import MusicStateEventType, emit_music_state_event
 
 
 # ============================================================
@@ -196,6 +197,11 @@ async def connect_to_voice(
         if not result.success:
 
             session.mark_disconnected()
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.VOICE_CHANGED,
+                notice=result.message,
+            )
 
 
             return VoiceConnectResult(
@@ -211,6 +217,11 @@ async def connect_to_voice(
         # ====================================================
 
         session.mark_connected()
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.VOICE_CHANGED,
+            notice=result.message,
+        )
 
 
         return VoiceConnectResult(
@@ -315,6 +326,11 @@ async def disconnect_from_voice(
         # ====================================================
 
         session.mark_disconnected()
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.VOICE_CHANGED,
+            notice=result.message,
+        )
 
 
         return VoiceDisconnectResult(

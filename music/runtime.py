@@ -72,6 +72,7 @@ from music.playback_backend import (
     PlaybackBackend,
 )
 from music.operation_lock import reset_operation_locks
+from music.audio_priority import reset_audio_priority_runtime
 from music.playback_clock import playback_clock_manager
 
 from music.playback_event_handler import (
@@ -318,6 +319,7 @@ def reset_music_runtime() -> None:
 
     reset_async_scheduler()
 
+    reset_audio_priority_runtime()
     reset_operation_locks()
     playback_clock_manager.clear()
 

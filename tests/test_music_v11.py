@@ -339,12 +339,17 @@ async def test_panel_has_real_controls_progress_and_help():
     emit_music_state_event(guild_id, MusicStateEventType.TRACK_STARTED, track=track)
     embed = build_player_embed(guild_id)
     view = CTXMusicView(guild_id)
-    custom_ids = {item.custom_id for item in view.children}
+    custom_ids = {
+        item.custom_id
+        for item in view.walk_children()
+        if getattr(item, "custom_id", None)
+    }
     assert len(custom_ids) == 9
     assert "ctx_music:pause_resume" in custom_ids
-    assert "progreso aproximado" in embed.footer.text
-    assert "REPRODUCIENDO" in embed.description
-    assert build_music_help_embed().title == "CTX MUSIC • Ayuda"
+    assert isinstance(view, discord.ui.LayoutView)
+    assert "Components V2" in embed.footer.text
+    assert "Song" in embed.description
+    assert build_music_help_embed().title == "CTX MUSIC · Ayuda"
 
 
 @pytest.mark.asyncio
@@ -361,7 +366,7 @@ async def test_panel_registry_reuses_one_message(monkeypatch, tmp_path):
         jump_url = "https://discord.test/message"
 
         async def edit(self, **kwargs):
-            return None
+            return self
 
     message = FakeMessage()
 

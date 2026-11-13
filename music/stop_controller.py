@@ -31,6 +31,7 @@ from music.player import (
     music_player_manager,
 )
 from music.operation_lock import get_guild_operation_lock
+from music.audio_priority import register_terminal_operation_during_tts
 
 from music.session import (
     music_session_manager,
@@ -99,6 +100,8 @@ async def stop_music(
     clear_queue=False:
         conserva la cola.
     """
+
+    register_terminal_operation_during_tts(guild_id)
 
     from music.autoplay_recommendations import cancel_pending_autoplay
 

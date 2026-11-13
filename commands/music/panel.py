@@ -1,10 +1,11 @@
-"""Professional, persistent and synchronized CTX Music panel."""
+"""Premium, persistent and synchronized CTX Music Components V2 panel."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import time
 from contextlib import suppress
 from dataclasses import dataclass
@@ -30,24 +31,47 @@ from music.volume_controller import get_music_volume, set_music_volume
 logger = logging.getLogger(__name__)
 
 PANEL_COLOR = discord.Color.from_rgb(178, 16, 48)
-IDLE_COLOR = discord.Color.from_rgb(35, 35, 42)
-MAX_QUEUE_PREVIEW = 5
+IDLE_COLOR = discord.Color.from_rgb(63, 65, 72)
+MAX_QUEUE_PREVIEW = 8
 PANEL_STORE = Path("data/music_panels.json")
-PANEL_DEBOUNCE_SECONDS = 1.5
-PROGRESS_REFRESH_SECONDS = 15.0
+
+
+def _env_seconds(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+PANEL_DEBOUNCE_SECONDS = _env_seconds(
+    "CTX_MUSIC_PANEL_DEBOUNCE_SECONDS", 1.5, 0.5, 5.0
+)
+PROGRESS_REFRESH_SECONDS = _env_seconds(
+    "CTX_MUSIC_PANEL_REFRESH_SECONDS", 15.0, 10.0, 60.0
+)
+
+
+def _truncate(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: max(1, limit - 1)].rstrip()}…"
 
 
 def _status_text(guild_id: int) -> tuple[str, str]:
     session = music_session_manager.get_session(guild_id)
+    if session.current_track is not None and not session.state.connected:
+        return "OFFLINE", "SIN CONEXIÓN DE VOZ"
     if session.current_track is None:
-        return "⏹️", "EN ESPERA"
+        return "READY", "EN ESPERA"
     if session.state.paused:
-        return "⏸️", "PAUSADO"
-    return "▶️", "REPRODUCIENDO"
+        return "PAUSED", "REPRODUCCIÓN PAUSADA"
+    return "LIVE", "REPRODUCIENDO"
 
 
 def _on_off(value: bool) -> str:
-    return "🟢 ON" if value else "⚫ OFF"
+    return "ON" if value else "OFF"
 
 
 def _safe_http_url(value: object) -> str | None:
@@ -57,27 +81,124 @@ def _safe_http_url(value: object) -> str | None:
 
 
 def _track_parts(track) -> tuple[str, str]:
-    title = str(getattr(track, "title", "Canción desconocida"))
-    if " — " in title:
-        song, artist = title.rsplit(" — ", 1)
-        return song.strip(), artist.strip()
-    return title, "Artista no disponible"
+    title = _truncate(getattr(track, "title", "Canción desconocida"), 120)
+    for separator in (" — ", " – "):
+        if separator in title:
+            song, artist = title.rsplit(separator, 1)
+            return _truncate(song, 80), _truncate(artist, 60)
+    return _truncate(title, 80), "Artista no disponible"
 
 
 def _queue_preview(guild_id: int) -> str:
     tracks = music_session_manager.get_session(guild_id).queue.get_all()
     if not tracks:
-        return "📭 No hay canciones esperando."
+        return "No hay canciones esperando."
 
     lines = [
-        f"`{index:02d}.` **{discord.utils.escape_markdown(track.title)}** "
-        f"• `{track.formatted_duration}` • {discord.utils.escape_markdown(track.requester_name)}"
+        f"`{index:02d}`  **{discord.utils.escape_markdown(_truncate(track.title, 75))}** "
+        f"· `{track.formatted_duration}` · {discord.utils.escape_markdown(_truncate(track.requester_name, 32))}"
         for index, track in enumerate(tracks[:MAX_QUEUE_PREVIEW], start=1)
     ]
     hidden = len(tracks) - len(lines)
     if hidden > 0:
-        lines.append(f"➕ **{hidden}** canción(es) más")
+        lines.append(f"…y **{hidden}** canción(es) más")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class PlayerPresentation:
+    accent_color: discord.Color
+    header: str
+    media_url: str | None
+    media_description: str | None
+    track_block: str
+    metadata_block: str
+    modes_block: str
+    next_block: str | None
+    notice_block: str | None
+    has_track: bool
+    paused: bool
+
+
+def build_player_presentation(
+    guild_id: int,
+    *,
+    notice: str | None = None,
+) -> PlayerPresentation:
+    """Create a compact, mobile-safe representation from authoritative state."""
+
+    session = music_session_manager.get_session(guild_id)
+    track = session.current_track
+    status_badge, status_name = _status_text(guild_id)
+    header = (
+        f"### CTX MUSIC  ·  {status_badge}\n"
+        f"**ZAREK AUDIO SYSTEM**  ·  {status_name}"
+    )
+
+    media_url: str | None = None
+    media_description: str | None = None
+    if track is None:
+        track_block = (
+            "## EN ESPERA\n"
+            "Solicita una canción con `/play` y este mismo panel se actualizará."
+        )
+    else:
+        song, artist = _track_parts(track)
+        safe_song = discord.utils.escape_markdown(song)
+        safe_artist = discord.utils.escape_markdown(artist)
+        track_url = _safe_http_url(getattr(track, "url", None))
+        heading = f"[{safe_song}]({track_url})" if track_url else safe_song
+        track_block = (
+            f"## {heading}\n"
+            f"**{safe_artist}**\n\n"
+            f"{playback_clock_manager.progress_text(guild_id, track.duration)}"
+        )
+        media_url = _safe_http_url(getattr(track, "thumbnail", None))
+        media_description = f"Portada de {_truncate(song, 180)}" if media_url else None
+
+    requester = (
+        discord.utils.escape_markdown(_truncate(track.requester_name, 40))
+        if track is not None
+        else "—"
+    )
+    metadata_block = (
+        f"**SOLICITADA POR**  {requester}\n"
+        f"**VOLUMEN**  `{session.state.volume:03d}%`   ·   "
+        f"**COLA**  `{session.queue.size():02d}`"
+    )
+    modes_block = (
+        f"**LOOP**  `{_on_off(session.state.loop_enabled)}`   ·   "
+        f"**AUTOPLAY**  `{_on_off(session.state.autoplay_enabled)}`"
+    )
+
+    next_track = session.queue.peek()
+    next_block = None
+    if next_track is not None:
+        next_block = (
+            "**SIGUIENTE**\n"
+            f"{discord.utils.escape_markdown(_truncate(next_track.title, 90))} "
+            f"· `{next_track.formatted_duration}`"
+        )
+    elif track is not None and session.state.autoplay_enabled:
+        next_block = "**SIGUIENTE**\nAutoplay elegirá una canción relacionada."
+
+    notice_block = None
+    if notice:
+        notice_block = f"-# {_truncate(discord.utils.escape_markdown(notice), 180)}"
+
+    return PlayerPresentation(
+        accent_color=PANEL_COLOR if track is not None else IDLE_COLOR,
+        header=header,
+        media_url=media_url,
+        media_description=media_description,
+        track_block=track_block,
+        metadata_block=metadata_block,
+        modes_block=modes_block,
+        next_block=next_block,
+        notice_block=notice_block,
+        has_track=track is not None,
+        paused=session.state.paused,
+    )
 
 
 def build_player_embed(
@@ -85,116 +206,53 @@ def build_player_embed(
     *,
     notice: str | None = None,
 ) -> discord.Embed:
-    """Build the panel from the authoritative guild session and clock."""
+    """Compatibility preview for callers that cannot render Components V2."""
 
-    session = music_session_manager.get_session(guild_id)
-    track = session.current_track
-    status_icon, status_name = _status_text(guild_id)
-
+    presentation = build_player_presentation(guild_id, notice=notice)
     embed = discord.Embed(
-        title="CTX MUSIC",
-        color=PANEL_COLOR if track else IDLE_COLOR,
+        title="CTX MUSIC · ZAREK AUDIO SYSTEM",
+        description=f"{presentation.track_block}\n\n{presentation.metadata_block}",
+        color=presentation.accent_color,
     )
-
-    if track is None:
-        embed.description = (
-            f"### {status_icon} {status_name}\n"
-            "El reproductor está listo. Usa `/play` para solicitar música."
-        )
-    else:
-        song, artist = _track_parts(track)
-        track_url = _safe_http_url(getattr(track, "url", None))
-        safe_song = discord.utils.escape_markdown(song)
-        safe_artist = discord.utils.escape_markdown(artist)
-        heading = f"[{safe_song}]({track_url})" if track_url else safe_song
-
-        embed.description = (
-            f"### {status_icon} {status_name}\n"
-            f"## {heading}\n"
-            f"**{safe_artist}**\n\n"
-            f"{playback_clock_manager.progress_text(guild_id, track.duration)}"
-        )
-
-        artwork = _safe_http_url(getattr(track, "thumbnail", None))
-        if artwork:
-            embed.set_image(url=artwork)
-
-        embed.add_field(
-            name="Solicitada por",
-            value=f"👤 {discord.utils.escape_markdown(track.requester_name)}",
-            inline=True,
-        )
-
-    embed.add_field(
-        name="Volumen",
-        value=f"🔊 `{session.state.volume}%`",
-        inline=True,
-    )
-    embed.add_field(
-        name="Cola",
-        value=f"📜 `{session.queue.size()}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="Modos",
-        value=(
-            f"🔁 Loop: **{_on_off(session.state.loop_enabled)}**\n"
-            f"♾️ Autoplay: **{_on_off(session.state.autoplay_enabled)}**"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name=f"Próximas • {session.queue.size()}",
-        value=_queue_preview(guild_id),
-        inline=False,
-    )
-
-    if notice:
-        embed.add_field(
-            name="Última acción",
-            value=discord.utils.escape_markdown(notice)[:1024],
-            inline=False,
-        )
-
-    embed.set_footer(
-        text="CTX RANK X7 • progreso aproximado • controles administrativos"
-    )
+    embed.add_field(name="MODOS", value=presentation.modes_block, inline=False)
+    if presentation.next_block:
+        embed.add_field(name="A CONTINUACIÓN", value=presentation.next_block, inline=False)
+    if presentation.media_url:
+        embed.set_image(url=presentation.media_url)
+    embed.set_footer(text="Vista de compatibilidad · el panel principal usa Components V2")
     return embed
 
 
 def build_music_help_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="CTX MUSIC • Ayuda",
+        title="CTX MUSIC · Ayuda",
         description=(
-            "Todos los miembros reales pueden solicitar canciones. "
-            "La reproducción y la cola son compartidas por servidor."
+            "La reproducción y la cola son compartidas por servidor. "
+            "Todos los miembros reales pueden solicitar canciones."
         ),
         color=PANEL_COLOR,
     )
     embed.add_field(
-        name="Para todos los miembros",
+        name="SOLICITAR Y CONSULTAR",
         value=(
-            "`/play <título o URL>` — solicita una canción\n"
-            "`/queue` — consulta la cola y posiciones\n"
-            "`/player` — abre o localiza el panel principal\n"
-            "`/musichelp` — muestra esta ayuda"
+            "`/play <título o URL>` · solicitar música\n"
+            "`/queue` · consultar posiciones\n"
+            "`/player` · abrir o localizar el panel\n"
+            "`/musichelp` · mostrar esta guía"
         ),
         inline=False,
     )
     embed.add_field(
-        name="Controles administrativos",
+        name="CONTROLES RESERVADOS",
         value=(
-            "`/pause`, `/resume`, `/skip`, `/stop`, `/volume`, "
-            "`/loop` y `/autoplay`. Los mismos permisos se aplican a los botones."
+            "`/pause`, `/resume`, `/skip`, `/stop`, `/volume`, `/loop` y "
+            "`/autoplay`. La misma jerarquía se aplica a los botones."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Prefijo tradicional",
-        value=(
-            "Usa las variantes `!ctx_play`, `!ctx_queue`, `!ctx_player` y "
-            "los demás comandos `!ctx_...`."
-        ),
+        name="COMANDOS TRADICIONALES",
+        value="También están disponibles las variantes `!ctx_...`.",
         inline=False,
     )
     return embed
@@ -207,21 +265,46 @@ class PanelReference:
     message_id: int
 
 
+async def _edit_panel_message(
+    message: discord.Message,
+    guild_id: int,
+    *,
+    notice: str | None = None,
+    view: CTXMusicView | None = None,
+) -> discord.Message:
+    view = view or CTXMusicView(guild_id, notice=notice)
+    flags = getattr(message, "flags", None)
+    already_v2 = bool(getattr(flags, "components_v2", False))
+    if already_v2:
+        return await message.edit(view=view)
+    return await message.edit(
+        content=None,
+        embed=None,
+        attachments=[],
+        view=view,
+    )
+
+
 class MusicPanelRegistry:
-    """Own one editable player message per guild and restore it after restart."""
+    """Own exactly one editable player message per guild."""
 
     def __init__(self) -> None:
         self.bot: commands.Bot | None = None
         self.references: dict[int, PanelReference] = {}
         self._messages: dict[int, discord.Message] = {}
         self._pending_updates: dict[int, asyncio.Task] = {}
+        self._pending_notices: dict[int, str | None] = {}
         self._last_edits: dict[int, float] = {}
+        self._panel_locks: dict[int, asyncio.Lock] = {}
         self._progress_task: asyncio.Task | None = None
         self._restored = False
         self._load()
 
     def bind(self, bot: commands.Bot) -> None:
         self.bot = bot
+
+    def _panel_lock(self, guild_id: int) -> asyncio.Lock:
+        return self._panel_locks.setdefault(guild_id, asyncio.Lock())
 
     def _load(self) -> None:
         if not PANEL_STORE.exists():
@@ -249,8 +332,7 @@ class MusicPanelRegistry:
         PANEL_STORE.parent.mkdir(parents=True, exist_ok=True)
         temporary = PANEL_STORE.with_suffix(".tmp")
         temporary.write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
         )
         temporary.replace(PANEL_STORE)
 
@@ -274,19 +356,24 @@ class MusicPanelRegistry:
         self._restored = True
         changed = False
         for guild_id, ref in tuple(self.references.items()):
-            message = await self._fetch_message(ref)
-            if message is None:
-                self.references.pop(guild_id, None)
-                changed = True
-                continue
-            view = CTXMusicView(guild_id)
-            self._messages[guild_id] = message
-            self.bot.add_view(view, message_id=ref.message_id)
-            with suppress(discord.HTTPException, discord.Forbidden):
-                await message.edit(
-                    embed=build_player_embed(guild_id),
-                    view=view,
-                )
+            async with self._panel_lock(guild_id):
+                message = await self._fetch_message(ref)
+                if message is None:
+                    self.references.pop(guild_id, None)
+                    self._messages.pop(guild_id, None)
+                    changed = True
+                    continue
+                view = CTXMusicView(guild_id)
+                self.bot.add_view(view, message_id=ref.message_id)
+                try:
+                    message = await _edit_panel_message(
+                        message, guild_id, view=view
+                    )
+                except (discord.HTTPException, discord.Forbidden):
+                    logger.warning("Could not restore CTX Music panel for guild %s", guild_id)
+                    continue
+                self._messages[guild_id] = message
+                self._last_edits[guild_id] = time.monotonic()
         if changed:
             self._save()
         self.start_progress_updates()
@@ -295,61 +382,64 @@ class MusicPanelRegistry:
         self,
         guild_id: int,
         channel: discord.abc.Messageable,
+        *,
+        notice: str | None = None,
     ) -> tuple[discord.Message, bool]:
-        ref = self.references.get(guild_id)
-        if ref is not None:
-            message = self._messages.get(guild_id) or await self._fetch_message(ref)
-            if message is not None:
-                self._messages[guild_id] = message
-                await message.edit(
-                    embed=build_player_embed(guild_id),
-                    view=CTXMusicView(guild_id),
-                )
-                return message, False
-            self.references.pop(guild_id, None)
+        async with self._panel_lock(guild_id):
+            ref = self.references.get(guild_id)
+            if ref is not None:
+                message = self._messages.get(guild_id) or await self._fetch_message(ref)
+                if message is not None:
+                    message = await _edit_panel_message(
+                        message, guild_id, notice=notice
+                    )
+                    self._messages[guild_id] = message
+                    self._last_edits[guild_id] = time.monotonic()
+                    return message, False
+                self.references.pop(guild_id, None)
+                self._messages.pop(guild_id, None)
 
-        message = await channel.send(
-            embed=build_player_embed(guild_id),
-            view=CTXMusicView(guild_id),
-        )
-        self.references[guild_id] = PanelReference(
-            guild_id=guild_id,
-            channel_id=message.channel.id,
-            message_id=message.id,
-        )
-        self._messages[guild_id] = message
-        self._save()
-        return message, True
+            view = CTXMusicView(guild_id, notice=notice)
+            message = await channel.send(view=view)
+            self.references[guild_id] = PanelReference(
+                guild_id=guild_id,
+                channel_id=message.channel.id,
+                message_id=message.id,
+            )
+            self._messages[guild_id] = message
+            self._last_edits[guild_id] = time.monotonic()
+            self._save()
+            return message, True
 
     async def refresh(self, guild_id: int, notice: str | None = None) -> bool:
-        ref = self.references.get(guild_id)
-        if ref is None:
-            return False
-        message = self._messages.get(guild_id) or await self._fetch_message(ref)
-        if message is None:
-            self.references.pop(guild_id, None)
-            self._messages.pop(guild_id, None)
-            self._save()
-            return False
-        try:
-            await message.edit(
-                embed=build_player_embed(guild_id, notice=notice),
-                view=CTXMusicView(guild_id),
-            )
-            self._last_edits[guild_id] = time.monotonic()
-            return True
-        except (discord.NotFound, discord.Forbidden):
-            self.references.pop(guild_id, None)
-            self._messages.pop(guild_id, None)
-            self._save()
-            return False
-        except discord.HTTPException:
-            logger.warning("Could not refresh music panel for guild %s", guild_id)
-            return False
+        async with self._panel_lock(guild_id):
+            ref = self.references.get(guild_id)
+            if ref is None:
+                return False
+            message = self._messages.get(guild_id) or await self._fetch_message(ref)
+            if message is None:
+                self.references.pop(guild_id, None)
+                self._messages.pop(guild_id, None)
+                self._save()
+                return False
+            try:
+                message = await _edit_panel_message(message, guild_id, notice=notice)
+                self._messages[guild_id] = message
+                self._last_edits[guild_id] = time.monotonic()
+                return True
+            except (discord.NotFound, discord.Forbidden):
+                self.references.pop(guild_id, None)
+                self._messages.pop(guild_id, None)
+                self._save()
+                return False
+            except discord.HTTPException:
+                logger.warning("Could not refresh music panel for guild %s", guild_id)
+                return False
 
     def on_state_event(self, event: MusicStateEvent) -> None:
         if event.guild_id not in self.references:
             return
+        self._pending_notices[event.guild_id] = event.notice
         existing = self._pending_updates.get(event.guild_id)
         if existing is not None and not existing.done():
             return
@@ -357,7 +447,8 @@ class MusicPanelRegistry:
         async def delayed_refresh() -> None:
             elapsed = time.monotonic() - self._last_edits.get(event.guild_id, 0.0)
             await asyncio.sleep(max(0.0, PANEL_DEBOUNCE_SECONDS - elapsed))
-            await self.refresh(event.guild_id, notice=event.notice)
+            notice = self._pending_notices.pop(event.guild_id, None)
+            await self.refresh(event.guild_id, notice=notice)
 
         task = asyncio.create_task(delayed_refresh())
         self._pending_updates[event.guild_id] = task
@@ -365,6 +456,15 @@ class MusicPanelRegistry:
         def remove_finished(completed: asyncio.Task) -> None:
             if self._pending_updates.get(event.guild_id) is completed:
                 self._pending_updates.pop(event.guild_id, None)
+            if completed.cancelled():
+                return
+            error = completed.exception()
+            if error is not None:
+                logger.error(
+                    "Deferred music panel refresh failed for guild %s",
+                    event.guild_id,
+                    exc_info=error,
+                )
 
         task.add_done_callback(remove_finished)
 
@@ -375,10 +475,23 @@ class MusicPanelRegistry:
         async def progress_loop() -> None:
             while True:
                 await asyncio.sleep(PROGRESS_REFRESH_SECONDS)
-                for guild_id in tuple(self.references):
-                    clock = playback_clock_manager.get_state(guild_id)
-                    if clock.running:
-                        await self.refresh(guild_id)
+                active_guilds = [
+                    guild_id
+                    for guild_id in tuple(self.references)
+                    if playback_clock_manager.get_state(guild_id).running
+                ]
+                if active_guilds:
+                    results = await asyncio.gather(
+                        *(self.refresh(guild_id) for guild_id in active_guilds),
+                        return_exceptions=True,
+                    )
+                    for guild_id, result in zip(active_guilds, results):
+                        if isinstance(result, BaseException):
+                            logger.error(
+                                "Progress refresh failed for guild %s",
+                                guild_id,
+                                exc_info=result,
+                            )
 
         self._progress_task = asyncio.create_task(progress_loop())
 
@@ -386,9 +499,11 @@ class MusicPanelRegistry:
         for task in self._pending_updates.values():
             task.cancel()
         self._pending_updates.clear()
+        self._pending_notices.clear()
         if self._progress_task is not None:
             self._progress_task.cancel()
             self._progress_task = None
+        self._restored = False
 
 
 panel_registry = MusicPanelRegistry()
@@ -399,23 +514,180 @@ def _interaction_lock(guild_id: int) -> asyncio.Lock:
     return _interaction_locks.setdefault(guild_id, asyncio.Lock())
 
 
-class CTXMusicView(discord.ui.View):
-    def __init__(self, guild_id: int) -> None:
+class CTXMusicView(discord.ui.LayoutView):
+    """Native Components V2 player with persistent, state-aware controls."""
+
+    def __init__(self, guild_id: int, *, notice: str | None = None) -> None:
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        self._sync_buttons()
+        self.presentation = build_player_presentation(guild_id, notice=notice)
+        self._build_controls()
+        self._build_layout()
+
+    def _new_button(
+        self,
+        *,
+        label: str,
+        custom_id: str,
+        style: discord.ButtonStyle,
+        callback,
+        emoji: str | None = None,
+        disabled: bool = False,
+    ) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=label,
+            custom_id=custom_id,
+            style=style,
+            emoji=emoji,
+            disabled=disabled,
+        )
+        button.callback = callback
+        return button
+
+    def _build_controls(self) -> None:
+        session = music_session_manager.get_session(self.guild_id)
+        has_track = self.presentation.has_track
+        has_music = has_track or session.queue.size() > 0
+
+        self.pause_resume_button = self._new_button(
+            label="Reanudar" if self.presentation.paused else "Pausar",
+            emoji="▶️" if self.presentation.paused else "⏸️",
+            custom_id="ctx_music:pause_resume",
+            style=(
+                discord.ButtonStyle.success
+                if self.presentation.paused
+                else discord.ButtonStyle.secondary
+            ),
+            callback=self._pause_resume,
+            disabled=not has_track,
+        )
+        self.skip_button = self._new_button(
+            label="Siguiente",
+            emoji="⏭️",
+            custom_id="ctx_music:skip",
+            style=discord.ButtonStyle.primary,
+            callback=self._skip,
+            disabled=not has_track,
+        )
+        self.stop_button = self._new_button(
+            label="Detener",
+            emoji="⏹️",
+            custom_id="ctx_music:stop",
+            style=discord.ButtonStyle.danger,
+            callback=self._stop,
+            disabled=not has_music,
+        )
+        self.loop_button = self._new_button(
+            label=f"Loop · {_on_off(session.state.loop_enabled)}",
+            emoji="🔁",
+            custom_id="ctx_music:loop",
+            style=(
+                discord.ButtonStyle.success
+                if session.state.loop_enabled
+                else discord.ButtonStyle.secondary
+            ),
+            callback=self._loop,
+            disabled=not has_track,
+        )
+        self.autoplay_button = self._new_button(
+            label=f"Auto · {_on_off(session.state.autoplay_enabled)}",
+            custom_id="ctx_music:autoplay",
+            style=(
+                discord.ButtonStyle.success
+                if session.state.autoplay_enabled
+                else discord.ButtonStyle.secondary
+            ),
+            callback=self._autoplay,
+        )
+        self.volume_down_button = self._new_button(
+            label="−10",
+            emoji="🔉",
+            custom_id="ctx_music:volume_down",
+            style=discord.ButtonStyle.secondary,
+            callback=self._volume_down,
+            disabled=not has_track,
+        )
+        self.volume_up_button = self._new_button(
+            label="+10",
+            emoji="🔊",
+            custom_id="ctx_music:volume_up",
+            style=discord.ButtonStyle.secondary,
+            callback=self._volume_up,
+            disabled=not has_track,
+        )
+        self.queue_button = self._new_button(
+            label="Ver cola",
+            custom_id="ctx_music:queue",
+            style=discord.ButtonStyle.secondary,
+            callback=self._queue,
+        )
+        self.refresh_button = self._new_button(
+            label="Actualizar",
+            custom_id="ctx_music:refresh",
+            style=discord.ButtonStyle.secondary,
+            callback=self._refresh,
+        )
+
+    def _build_layout(self) -> None:
+        p = self.presentation
+        children: list[discord.ui.Item] = [discord.ui.TextDisplay(p.header)]
+        if p.media_url:
+            children.append(
+                discord.ui.MediaGallery(
+                    discord.MediaGalleryItem(
+                        p.media_url,
+                        description=p.media_description,
+                    )
+                )
+            )
+        children.extend(
+            [
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                discord.ui.TextDisplay(p.track_block),
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                discord.ui.TextDisplay(p.metadata_block),
+                discord.ui.TextDisplay(p.modes_block),
+            ]
+        )
+        if p.next_block:
+            children.append(discord.ui.TextDisplay(p.next_block))
+        if p.notice_block:
+            children.append(discord.ui.TextDisplay(p.notice_block))
+        children.extend(
+            [
+                discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                discord.ui.ActionRow(
+                    self.pause_resume_button,
+                    self.skip_button,
+                    self.stop_button,
+                ),
+                discord.ui.ActionRow(
+                    self.loop_button,
+                    self.autoplay_button,
+                    self.volume_down_button,
+                    self.volume_up_button,
+                ),
+                discord.ui.ActionRow(self.queue_button, self.refresh_button),
+                discord.ui.TextDisplay(
+                    "-# CTX RANK X7 · progreso aproximado · controles protegidos"
+                ),
+            ]
+        )
+        self.add_item(
+            discord.ui.Container(*children, accent_color=p.accent_color)
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.guild_id != self.guild_id:
             await interaction.response.send_message(
-                "❌ Este panel pertenece a otro servidor.", ephemeral=True
+                "Este panel pertenece a otro servidor.", ephemeral=True
             )
             return False
         if not isinstance(interaction.user, discord.Member) or not is_real_music_member(
             interaction.user
         ):
             await interaction.response.send_message(
-                "❌ No pude validar tu membresía.", ephemeral=True
+                "No pude validar tu membresía.", ephemeral=True
             )
             return False
         return True
@@ -425,48 +697,17 @@ class CTXMusicView(discord.ui.View):
         if can_manage_music(interaction.user):
             return True
         await interaction.response.send_message(
-            "⛔ No tienes permiso para controlar CTX Music.", ephemeral=True
+            "No tienes permiso para controlar CTX Music.", ephemeral=True
         )
         return False
 
-    def _sync_buttons(self) -> None:
-        session = music_session_manager.get_session(self.guild_id)
-        has_track = session.current_track is not None
-        self.pause_resume_button.disabled = not has_track
-        self.skip_button.disabled = not has_track
-        self.stop_button.disabled = not has_track
-
-        if session.state.paused:
-            self.pause_resume_button.label = "Reanudar"
-            self.pause_resume_button.emoji = "▶️"
-            self.pause_resume_button.style = discord.ButtonStyle.success
-        else:
-            self.pause_resume_button.label = "Pausar"
-            self.pause_resume_button.emoji = "⏸️"
-            self.pause_resume_button.style = discord.ButtonStyle.secondary
-
-        self.loop_button.style = (
-            discord.ButtonStyle.success
-            if session.state.loop_enabled
-            else discord.ButtonStyle.secondary
-        )
-        self.autoplay_button.style = (
-            discord.ButtonStyle.success
-            if session.state.autoplay_enabled
-            else discord.ButtonStyle.secondary
-        )
-
     async def _finish_action(
-        self,
-        interaction: discord.Interaction,
-        notice: str,
+        self, interaction: discord.Interaction, notice: str
     ) -> None:
         updated = await panel_registry.refresh(self.guild_id, notice=notice)
         if not updated and interaction.message is not None:
-            self._sync_buttons()
-            await interaction.message.edit(
-                embed=build_player_embed(self.guild_id, notice=notice),
-                view=self,
+            await _edit_panel_message(
+                interaction.message, self.guild_id, notice=notice
             )
 
     async def on_error(
@@ -476,17 +717,13 @@ class CTXMusicView(discord.ui.View):
         item: discord.ui.Item,
     ) -> None:
         logger.error("Music panel interaction failed", exc_info=error)
-        message = "❌ CTX Music no pudo completar esa acción."
+        message = "CTX Music no pudo completar esa acción."
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
 
-    @discord.ui.button(
-        label="Pausar", emoji="⏸️", style=discord.ButtonStyle.secondary,
-        row=0, custom_id="ctx_music:pause_resume",
-    )
-    async def pause_resume_button(self, interaction, button) -> None:
+    async def _pause_resume(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -499,11 +736,7 @@ class CTXMusicView(discord.ui.View):
             )
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="Saltar", emoji="⏭️", style=discord.ButtonStyle.primary,
-        row=0, custom_id="ctx_music:skip",
-    )
-    async def skip_button(self, interaction, button) -> None:
+    async def _skip(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -511,11 +744,7 @@ class CTXMusicView(discord.ui.View):
             result = await skip_current_track(self.guild_id)
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="Detener", emoji="⏹️", style=discord.ButtonStyle.danger,
-        row=0, custom_id="ctx_music:stop",
-    )
-    async def stop_button(self, interaction, button) -> None:
+    async def _stop(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -523,11 +752,7 @@ class CTXMusicView(discord.ui.View):
             result = await stop_music(self.guild_id, clear_queue=True)
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="Loop", emoji="🔁", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="ctx_music:loop",
-    )
-    async def loop_button(self, interaction, button) -> None:
+    async def _loop(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -535,11 +760,7 @@ class CTXMusicView(discord.ui.View):
             result = await toggle_loop(self.guild_id)
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="Autoplay", emoji="♾️", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="ctx_music:autoplay",
-    )
-    async def autoplay_button(self, interaction, button) -> None:
+    async def _autoplay(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -547,11 +768,7 @@ class CTXMusicView(discord.ui.View):
             result = await toggle_autoplay(self.guild_id)
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="-10", emoji="🔉", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="ctx_music:volume_down",
-    )
-    async def volume_down_button(self, interaction, button) -> None:
+    async def _volume_down(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -561,11 +778,7 @@ class CTXMusicView(discord.ui.View):
             )
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="+10", emoji="🔊", style=discord.ButtonStyle.secondary,
-        row=1, custom_id="ctx_music:volume_up",
-    )
-    async def volume_up_button(self, interaction, button) -> None:
+    async def _volume_up(self, interaction: discord.Interaction) -> None:
         if not await self._require_control(interaction):
             return
         await interaction.response.defer()
@@ -575,26 +788,15 @@ class CTXMusicView(discord.ui.View):
             )
         await self._finish_action(interaction, result.message)
 
-    @discord.ui.button(
-        label="Cola", emoji="📜", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="ctx_music:queue",
-    )
-    async def queue_button(self, interaction, button) -> None:
-        tracks = music_session_manager.get_session(self.guild_id).queue.get_all()
-        text = _queue_preview(self.guild_id)
-        if len(tracks) > MAX_QUEUE_PREVIEW:
-            text += f"\n\nTotal pendiente: **{len(tracks)}**"
+    async def _queue(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_message(
-            f"📜 **CTX MUSIC — COLA**\n\n{text}", ephemeral=True
+            f"**CTX MUSIC · COLA**\n\n{_queue_preview(self.guild_id)}",
+            ephemeral=True,
         )
 
-    @discord.ui.button(
-        label="Actualizar", emoji="🔄", style=discord.ButtonStyle.secondary,
-        row=2, custom_id="ctx_music:refresh",
-    )
-    async def refresh_button(self, interaction, button) -> None:
+    async def _refresh(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
-        await self._finish_action(interaction, "Panel actualizado.")
+        await self._finish_action(interaction, "Panel sincronizado.")
 
 
 class MusicPanelCommands(commands.Cog):
@@ -621,11 +823,11 @@ class MusicPanelCommands(commands.Cog):
         if ctx.guild is None or not isinstance(ctx.author, discord.Member):
             return
         if not is_real_music_member(ctx.author):
-            await ctx.send("⛔ Los bots no pueden abrir CTX Music.")
+            await ctx.send("Los bots no pueden abrir CTX Music.")
             return
         message, created = await panel_registry.get_or_create(ctx.guild.id, ctx.channel)
         if not created:
-            await ctx.send(f"🎵 El panel principal ya está aquí: {message.jump_url}")
+            await ctx.send(f"Panel principal: {message.jump_url}", delete_after=12)
 
     @commands.command(name="ctx_musichelp", aliases=["ctx_music"])
     @commands.guild_only()
@@ -640,14 +842,14 @@ class MusicPanelCommands(commands.Cog):
     async def slash_player(self, interaction: discord.Interaction) -> None:
         if interaction.guild_id is None or interaction.channel is None:
             await interaction.response.send_message(
-                "❌ Este comando solo funciona en un servidor.", ephemeral=True
+                "Este comando solo funciona en un servidor.", ephemeral=True
             )
             return
         if not isinstance(interaction.user, discord.Member) or not is_real_music_member(
             interaction.user
         ):
             await interaction.response.send_message(
-                "⛔ Los bots no pueden abrir CTX Music.", ephemeral=True
+                "Los bots no pueden abrir CTX Music.", ephemeral=True
             )
             return
 
@@ -655,9 +857,9 @@ class MusicPanelCommands(commands.Cog):
         message, created = await panel_registry.get_or_create(
             interaction.guild_id, interaction.channel
         )
-        verb = "creado" if created else "actualizado"
+        verb = "creado" if created else "sincronizado"
         await interaction.followup.send(
-            f"🎵 Panel principal {verb}: {message.jump_url}", ephemeral=True
+            f"Panel principal {verb}: {message.jump_url}", ephemeral=True
         )
 
     @app_commands.command(
@@ -669,7 +871,7 @@ class MusicPanelCommands(commands.Cog):
             interaction.user
         ):
             await interaction.response.send_message(
-                "⛔ Este comando requiere un miembro real.", ephemeral=True
+                "Este comando requiere un miembro real.", ephemeral=True
             )
             return
         await interaction.response.send_message(
@@ -679,3 +881,14 @@ class MusicPanelCommands(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     await bot.add_cog(MusicPanelCommands(bot))
+
+
+def get_music_panel_summary() -> dict:
+    return {
+        "components_v2": True,
+        "persistent": True,
+        "one_panel_per_guild": True,
+        "state_driven_controls": True,
+        "debounce_seconds": PANEL_DEBOUNCE_SECONDS,
+        "progress_refresh_seconds": PROGRESS_REFRESH_SECONDS,
+    }

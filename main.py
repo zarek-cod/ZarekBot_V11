@@ -48,14 +48,12 @@ from music.autoplay_recommendations import (
 
 )
 
-from music.audio_priority import (
-    begin_tts_interruption,
-    finish_tts_interruption,
-)
+from music.audio_priority import tts_audio_session
 
 from music.permissions import can_manage_music
 
 from music.session import music_session_manager
+from music.state_events import MusicStateEventType, emit_music_state_event
 
 # --- 1. CONFIGURACIÓN Y MULTI-API ---
 
@@ -561,10 +559,6 @@ async def cargar_extensiones():
 
 
 sesiones_usuarios = {}
-
-
-
-cola_de_voz_lock = asyncio.Lock()
 
 
 
@@ -1264,6 +1258,28 @@ async def on_voice_state_update(member, before, after):
 
     if member == bot.user:
 
+        music_session = music_session_manager.get_session(member.guild.id)
+
+        if after.channel is None:
+
+            music_session.mark_disconnected()
+
+            emit_music_state_event(
+                member.guild.id,
+                MusicStateEventType.VOICE_CHANGED,
+                notice="Discord Voice se desconectó.",
+            )
+
+        elif before.channel != after.channel:
+
+            music_session.mark_connected()
+
+            emit_music_state_event(
+                member.guild.id,
+                MusicStateEventType.VOICE_CHANGED,
+                notice=f"Discord Voice conectado a {after.channel.name}.",
+            )
+
         # El bot fue desconectado (y no por el comando oficial)
 
         if before.channel and not after.channel and fue_invocado:
@@ -1352,13 +1368,9 @@ async def hablar_texto(guild, canal_texto, texto):
 
 
 
-    async with cola_de_voz_lock: 
+    archivo_audio = None
 
-        interrupcion_musical = None
-
-        archivo_audio = None
-
-        try:
+    try:
 
             ruta_ffmpeg = os.path.abspath("ffmpeg.exe")
 
@@ -1417,59 +1429,58 @@ async def hablar_texto(guild, canal_texto, texto):
             await comunicador.save(archivo_audio)
 
 
-            interrupcion_musical = await begin_tts_interruption(guild.id)
+            async with tts_audio_session(guild.id) as interrupcion_musical:
 
-            for _ in range(20):
+                voice_client = discord.utils.get(bot.voice_clients, guild=guild)
 
-                if not voice_client.is_playing() and not voice_client.is_paused():
+                if interrupcion_musical.track is not None and not interrupcion_musical.active:
 
-                    break
+                    raise RuntimeError("CTX Music no cedió el canal de voz")
 
-                await asyncio.sleep(0.05)
+                if voice_client is None or not voice_client.is_connected():
+
+                    raise RuntimeError("Discord Voice se desconectó antes del TTS")
+
+                for _ in range(20):
+
+                    if not voice_client.is_playing() and not voice_client.is_paused():
+
+                        break
+
+                    await asyncio.sleep(0.05)
 
 
 
-            fuente = discord.FFmpegPCMAudio(executable=ruta_ffmpeg, source=archivo_audio, options="-vn")
+                fuente = discord.FFmpegPCMAudio(executable=ruta_ffmpeg, source=archivo_audio, options="-vn")
 
-            voice_client.play(fuente)
-
-
-
-            while voice_client.is_playing(): await asyncio.sleep(0.5)
+                voice_client.play(fuente)
 
 
 
-        except Exception as e:
+                while voice_client.is_playing():
 
-            print(
-                "⚠️ [CTX VOICE] No se pudo reproducir TTS:",
-                type(e).__name__,
-            )
+                    await asyncio.sleep(0.25)
 
-        finally:
 
-            if archivo_audio and os.path.exists(archivo_audio):
 
-                try:
+    except Exception as e:
 
-                    os.remove(archivo_audio)
+        print(
+            "⚠️ [CTX VOICE] No se pudo reproducir TTS:",
+            type(e).__name__,
+        )
 
-                except OSError:
+    finally:
 
-                    pass
+        if archivo_audio and os.path.exists(archivo_audio):
 
-            if interrupcion_musical is not None:
+            try:
 
-                try:
+                os.remove(archivo_audio)
 
-                    await finish_tts_interruption(interrupcion_musical)
+            except OSError:
 
-                except Exception as error:
-
-                    print(
-                        "⚠️ [CTX VOICE] No se pudo restaurar CTX Music:",
-                        type(error).__name__,
-                    )
+                pass
 
 
 

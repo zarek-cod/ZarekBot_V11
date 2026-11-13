@@ -11,10 +11,8 @@ Comandos disponibles:
 
 Jerarquía musical:
 
-    ZAREK   -> permitido
-    CENTI   -> permitido
-    JHILMAR -> denegado
-    OTROS   -> denegado
+    TODOS LOS MIEMBROS REALES -> permitido
+    BOTS                       -> denegado
 
 La autoridad real se obtiene desde:
 
@@ -25,6 +23,8 @@ hardcodeadas de jerarquía.
 """
 
 from __future__ import annotations
+
+import logging
 
 import discord
 
@@ -40,6 +40,9 @@ from music.play_controller import (
     PlayRequestResult,
     play_music_request,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -61,16 +64,11 @@ def can_use_play_command(
     member: discord.Member,
 ) -> bool:
     """
-    Comprueba que el usuario tenga autoridad
-    tanto para solicitar música como para
-    utilizar PLAY.
+    Permite PLAY a cualquier miembro real y
+    mantiene fuera a las cuentas bot.
 
-    Actualmente esto permite:
-
-        ZAREK ✅
-        CENTI ✅
-        JHILMAR ❌
-        OTROS ❌
+    Los controles globales siguen reservados
+    a la jerarquía definida en music.permissions.
     """
 
     return (
@@ -114,80 +112,54 @@ def _get_voice_channel_id(
 
 def _format_play_result(
     result: PlayRequestResult,
+    *,
+    panel_url: str | None = None,
 ) -> str:
-    """
-    Respuesta temporal de PLAY.
-
-    Más adelante la sustituiremos por
-    la interfaz visual completa de CTX Music.
-    """
-
-    # ========================================================
-    # ERROR
-    # ========================================================
-
+    """Build one compact confirmation; the principal UI lives in /player."""
     if not result.success:
-
-        return (
-            "❌ **CTX MUSIC**\n\n"
-            f"{result.message}"
-        )
-
+        return f"No se pudo completar la solicitud: {result.message}"
 
     track = result.track
-
-
     if track is None:
+        return "No pude obtener información de la canción."
 
-        return (
-            "❌ **CTX MUSIC**\n\n"
-            "No pude obtener información "
-            "de la canción."
-        )
-
-
-    # ========================================================
-    # REPRODUCIENDO
-    # ========================================================
-
-    if result.started:
-
-        return (
-            "🎵 **CTX MUSIC — REPRODUCIENDO**\n\n"
-            f"**{track.title}**\n\n"
-            f"⏱️ Duración: "
-            f"`{track.formatted_duration}`\n"
-            f"👤 Solicitada por: "
-            f"`{track.requester_name}`"
-        )
-
-
-    # ========================================================
-    # AGREGADA A COLA
-    # ========================================================
-
-    if result.queued:
-
-        return (
-            "📜 **CTX MUSIC — AGREGADA A LA COLA**\n\n"
-            f"**{track.title}**\n\n"
-            f"📍 Posición: "
-            f"`{result.position}`\n"
-            f"⏱️ Duración: "
-            f"`{track.formatted_duration}`\n"
-            f"👤 Solicitada por: "
-            f"`{track.requester_name}`"
-        )
-
-
-    # ========================================================
-    # FALLBACK
-    # ========================================================
-
-    return (
-        "🎵 **CTX MUSIC**\n\n"
-        f"{result.message}"
+    title = discord.utils.escape_markdown(track.title)
+    if len(title) > 90:
+        title = f"{title[:89].rstrip()}…"
+    details = (
+        f"`{track.formatted_duration}` · "
+        f"solicitada por **{discord.utils.escape_markdown(track.requester_name)}**"
     )
+    panel = f" · [Abrir panel]({panel_url})" if panel_url else ""
+    if result.started:
+        return f"▶ **{title}** · {details}{panel}"
+    if result.queued:
+        return f"＋ **{title}** · posición `{result.position}` · {details}{panel}"
+    return f"{result.message}{panel}"
+
+
+async def _sync_player_panel(
+    *,
+    guild_id: int,
+    channel: discord.abc.Messageable,
+    result: PlayRequestResult,
+) -> str | None:
+    """Create or update the single panel without coupling the music core to UI."""
+
+    if not result.success:
+        return None
+    try:
+        from commands.music.panel import panel_registry
+
+        message, _ = await panel_registry.get_or_create(
+            guild_id,
+            channel,
+            notice=result.message,
+        )
+        return message.jump_url
+    except Exception:
+        logger.exception("Could not synchronize CTX Music panel after /play")
+        return None
 
 
 # ============================================================
@@ -397,10 +369,14 @@ class MusicPlayCommands(
         # RESPONDER
         # ====================================================
 
+        panel_url = await _sync_player_panel(
+            guild_id=ctx.guild.id,
+            channel=ctx.channel,
+            result=result,
+        )
         await ctx.send(
-            _format_play_result(
-                result
-            )
+            _format_play_result(result, panel_url=panel_url),
+            delete_after=15 if result.success else None,
         )
 
 
@@ -498,7 +474,8 @@ class MusicPlayCommands(
         #
 
         await interaction.response.defer(
-            thinking=True
+            thinking=True,
+            ephemeral=True,
         )
 
 
@@ -521,11 +498,16 @@ class MusicPlayCommands(
         # RESPONDER
         # ====================================================
 
-        await interaction.followup.send(
-
-            _format_play_result(
-                result
+        panel_url = None
+        if interaction.channel is not None:
+            panel_url = await _sync_player_panel(
+                guild_id=interaction.guild_id,
+                channel=interaction.channel,
+                result=result,
             )
+        await interaction.followup.send(
+            _format_play_result(result, panel_url=panel_url),
+            ephemeral=True,
         )
 
 
