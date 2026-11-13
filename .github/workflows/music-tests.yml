@@ -44,7 +44,7 @@ jobs:
         run: python -m pip check
 
       - name: Compile application modules
-        run: python -m compileall -q main.py music commands config moderation voice ui
+        run: python -m compileall -q main.py music commands config moderation ui
 
       - name: Run CTX Music suite
         run: python -m pytest -q

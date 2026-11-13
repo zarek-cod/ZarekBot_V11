@@ -7,7 +7,7 @@ Instalación y ejecución:
 ```powershell
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python -m compileall -q main.py music commands config moderation voice ui
+python -m compileall -q main.py music commands config moderation ui
 ```
 
 Las suites `tests/test_music_v11.py` y `tests/test_music_premium.py` validan con
