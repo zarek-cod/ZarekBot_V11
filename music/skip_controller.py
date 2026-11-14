@@ -42,6 +42,8 @@ from music.player import (
     PlayerStatus,
     music_player_manager,
 )
+from music.operation_lock import get_guild_operation_lock
+from music.audio_priority import register_terminal_operation_during_tts
 
 from music.session import (
     music_session_manager,
@@ -52,6 +54,10 @@ from music.stream_refresher import (
 )
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -93,9 +99,7 @@ def _get_skip_lock(
 
     if guild_id not in _skip_locks:
 
-        _skip_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _skip_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _skip_locks[
@@ -138,12 +142,18 @@ async def skip_current_track(
         deja el reproductor detenido.
     """
 
+    register_terminal_operation_during_tts(guild_id)
+
     global _skip_count
     global _skip_failures
 
     global _refresh_attempts
     global _refresh_successes
     global _refresh_failures
+
+    from music.autoplay_recommendations import cancel_pending_autoplay
+
+    cancel_pending_autoplay(guild_id)
 
 
     lock = _get_skip_lock(
@@ -308,6 +318,17 @@ async def skip_current_track(
                 PlayerStatus.STOPPED
             )
 
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.STOPPED,
+                track=skipped_track,
+            )
+
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.QUEUE_CHANGED,
+            )
+
 
             return SkipResult(
                 success=True,
@@ -350,6 +371,14 @@ async def skip_current_track(
                 PlayerStatus.IDLE
             )
 
+            session.queue.current = None
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.PLAYBACK_ERROR,
+                track=next_track,
+                notice=str(error),
+            )
+
 
             return SkipResult(
                 success=False,
@@ -378,6 +407,14 @@ async def skip_current_track(
 
             player.status = (
                 PlayerStatus.IDLE
+            )
+
+            session.queue.current = None
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.PLAYBACK_ERROR,
+                track=next_track,
+                notice=refresh_result.message,
             )
 
 
@@ -410,6 +447,14 @@ async def skip_current_track(
                 PlayerStatus.IDLE
             )
 
+            session.queue.current = None
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.PLAYBACK_ERROR,
+                track=next_track,
+                notice="La siguiente canción no tiene un stream reproducible.",
+            )
+
 
             return SkipResult(
                 success=False,
@@ -435,6 +480,32 @@ async def skip_current_track(
         # REPRODUCIR SIGUIENTE
         # ====================================================
 
+        if not backend.is_connected:
+            if next_track.voice_channel_id is None:
+                _skip_failures += 1
+                session.queue.current = None
+                return SkipResult(
+                    success=False,
+                    skipped_track=skipped_track,
+                    next_track=next_track,
+                    next_started=False,
+                    stream_refreshed=refresh_result.refreshed,
+                    message="CTX perdió la conexión de voz y no pudo recuperarla.",
+                )
+            reconnect_result = await backend.connect(next_track.voice_channel_id)
+            if not reconnect_result.success:
+                _skip_failures += 1
+                session.queue.current = None
+                return SkipResult(
+                    success=False,
+                    skipped_track=skipped_track,
+                    next_track=next_track,
+                    next_started=False,
+                    stream_refreshed=refresh_result.refreshed,
+                    message=reconnect_result.message,
+                )
+            session.mark_connected()
+
         try:
 
             play_result = (
@@ -451,6 +522,14 @@ async def skip_current_track(
 
             player.status = (
                 PlayerStatus.IDLE
+            )
+
+            session.queue.current = None
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.PLAYBACK_ERROR,
+                track=next_track,
+                notice=str(error),
             )
 
 
@@ -483,6 +562,14 @@ async def skip_current_track(
                 PlayerStatus.IDLE
             )
 
+            session.queue.current = None
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.PLAYBACK_ERROR,
+                track=next_track,
+                notice=play_result.message,
+            )
+
 
             return SkipResult(
                 success=False,
@@ -499,6 +586,17 @@ async def skip_current_track(
                 ),
             )
 
+        if session.current_track is not next_track:
+            _skip_failures += 1
+            return SkipResult(
+                success=False,
+                skipped_track=skipped_track,
+                next_track=next_track,
+                next_started=False,
+                stream_refreshed=refresh_result.refreshed,
+                message="La siguiente canción terminó antes de estabilizarse.",
+            )
+
 
         # ====================================================
         # ÉXITO
@@ -513,6 +611,17 @@ async def skip_current_track(
 
 
         _skip_count += 1
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.TRACK_STARTED,
+            track=next_track,
+        )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.QUEUE_CHANGED,
+        )
 
 
         return SkipResult(

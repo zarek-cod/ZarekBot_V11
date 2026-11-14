@@ -28,12 +28,17 @@ from music.player import (
     PlayerStatus,
     music_player_manager,
 )
+from music.operation_lock import get_guild_operation_lock
 
 from music.session import (
     music_session_manager,
 )
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -75,9 +80,7 @@ def _get_resume_lock(
 
     if guild_id not in _resume_locks:
 
-        _resume_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _resume_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _resume_locks[
@@ -264,6 +267,12 @@ async def resume_current_track(
 
         player.status = (
             PlayerStatus.PLAYING
+        )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.RESUMED,
+            track=track,
         )
 
 

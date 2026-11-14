@@ -26,6 +26,13 @@ from music.session import (
     music_session_manager,
 )
 
+from music.operation_lock import get_guild_operation_lock
+
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
+
 from music.track import Track
 
 
@@ -119,9 +126,7 @@ def _get_queue_lock(
 
     if guild_id not in _queue_locks:
 
-        _queue_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _queue_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _queue_locks[
@@ -275,7 +280,7 @@ async def remove_queue_track(
         # ÉXITO
         # ====================================================
 
-        return RemoveQueueTrackResult(
+        result = RemoveQueueTrackResult(
             success=True,
             removed_track=removed_track,
             position=position,
@@ -285,6 +290,13 @@ async def remove_queue_track(
                 f"{position}."
             ),
         )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.QUEUE_CHANGED,
+            track=removed_track,
+        )
+        return result
 
 
 # ============================================================
@@ -328,7 +340,7 @@ async def clear_pending_queue(
         session.queue.clear()
 
 
-        return ClearQueueResult(
+        result = ClearQueueResult(
             success=True,
             removed_count=removed_count,
             current_track_preserved=(
@@ -340,6 +352,12 @@ async def clear_pending_queue(
                 f"pendientes."
             ),
         )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.QUEUE_CHANGED,
+        )
+        return result
 
 
 # ============================================================

@@ -90,6 +90,10 @@ class DiscordPlaybackBackend(
         # Generaciones detenidas manualmente.
         self._manual_stop_generations: set[int] = set()
 
+        # Generations intentionally stopped so another CTX audio source (TTS)
+        # can use the single Discord VoiceClient without advancing the queue.
+        self._external_interrupt_generations: set[int] = set()
+
 
     # ========================================================
     # SERVIDOR
@@ -153,6 +157,12 @@ class DiscordPlaybackBackend(
             self.voice_client is not None
             and self.voice_client.is_connected()
         )
+
+    @property
+    def is_connected(self) -> bool:
+        """Use the live Discord connection instead of a potentially stale enum."""
+
+        return self._voice_is_connected()
 
 
     # ========================================================
@@ -428,6 +438,8 @@ class DiscordPlaybackBackend(
     async def play(
         self,
         track: Track,
+        *,
+        start_at: int | float = 0,
     ) -> PlaybackResult:
 
         # ====================================================
@@ -571,6 +583,9 @@ class DiscordPlaybackBackend(
         # FUENTE FFMPEG
         # ====================================================
 
+        seek_seconds = max(0.0, float(start_at))
+        seek_option = f"-ss {seek_seconds:.3f} " if seek_seconds > 0 else ""
+
         try:
 
             ffmpeg_audio = (
@@ -581,7 +596,8 @@ class DiscordPlaybackBackend(
                     executable=ffmpeg_executable,
 
                     before_options=(
-                        "-reconnect 1 "
+                        seek_option
+                        + "-reconnect 1 "
                         "-reconnect_streamed 1 "
                         "-reconnect_delay_max 5"
                     ),
@@ -872,6 +888,20 @@ class DiscordPlaybackBackend(
             generation
         )
 
+        external_interrupt = generation in self._external_interrupt_generations
+        self._external_interrupt_generations.discard(generation)
+
+        if external_interrupt:
+            if generation == self._playback_generation:
+                self.current_track = None
+                self.audio_source = None
+                self.state = (
+                    PlaybackState.CONNECTED
+                    if self._voice_is_connected()
+                    else PlaybackState.DISCONNECTED
+                )
+            return
+
 
         # ====================================================
         # ERROR REAL
@@ -1113,6 +1143,40 @@ class DiscordPlaybackBackend(
             ),
         )
 
+    async def interrupt_for_external_audio(self) -> PlaybackResult:
+        """Release VoiceClient for TTS without emitting stop/finish events."""
+
+        if self.voice_client is None:
+            return PlaybackResult(
+                success=True,
+                action="interrupt",
+                message="No había audio musical activo.",
+            )
+
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
+            if self._playback_generation > 0:
+                self._external_interrupt_generations.add(self._playback_generation)
+            self.voice_client.stop()
+            await asyncio.sleep(0)
+
+        self.current_track = None
+        self.audio_source = None
+        self.state = PlaybackState.CONNECTED
+        return PlaybackResult(
+            success=True,
+            action="interrupt",
+            message="Música cedida temporalmente a CTX Voice.",
+        )
+
+    async def play_from(
+        self,
+        track: Track,
+        position_seconds: int | float,
+    ) -> PlaybackResult:
+        """Restart a refreshed stream from an approximate elapsed position."""
+
+        return await self.play(track, start_at=position_seconds)
+
 
     # ========================================================
     # CONTINUAR
@@ -1301,6 +1365,9 @@ class DiscordPlaybackBackend(
                 len(
                     self._manual_stop_generations
                 ),
+
+            "pending_external_interrupts":
+                len(self._external_interrupt_generations),
         })
 
 

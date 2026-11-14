@@ -187,6 +187,24 @@ class MockPlaybackBackend(
             ),
         )
 
+    async def interrupt_for_external_audio(self) -> PlaybackResult:
+        """Test equivalent of the Discord VoiceClient ownership hand-off."""
+
+        self.current_track = None
+        self.state = PlaybackState.CONNECTED
+        return PlaybackResult(
+            success=True,
+            action="interrupt",
+            message="Mock interrumpido para audio externo.",
+        )
+
+    async def play_from(
+        self,
+        track: Track,
+        position_seconds: int | float,
+    ) -> PlaybackResult:
+        return await self.play(track)
+
 
     # ========================================================
     # CONTINUAR

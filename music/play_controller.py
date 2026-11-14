@@ -44,6 +44,8 @@ from music.backend_manager import (
     playback_backend_manager,
 )
 
+from music.operation_lock import get_guild_operation_lock
+
 from music.pipeline import (
     MusicPipelineResult,
     process_music_request,
@@ -57,6 +59,7 @@ from music.player import (
 from music.resolver_setup import (
     configure_music_resolvers,
 )
+from music.request_deduplicator import claim_music_request
 
 from music.session import (
     music_session_manager,
@@ -67,6 +70,11 @@ from music.stream_refresher import (
 )
 
 from music.track import Track
+
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 from music.voice_controller import (
     connect_to_voice,
@@ -117,9 +125,7 @@ def _get_play_lock(
 
     if guild_id not in _play_locks:
 
-        _play_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _play_locks[guild_id] = get_guild_operation_lock(guild_id)
 
     return _play_locks[
         guild_id
@@ -155,6 +161,7 @@ async def play_music_request(
     query: str,
     requester_id: int,
     requester_name: str,
+    request_id: str | int | None = None,
 ) -> PlayRequestResult:
     """
     Procesa una solicitud PLAY completa.
@@ -179,6 +186,18 @@ async def play_music_request(
 
 
     _play_requests += 1
+
+    if not claim_music_request(request_id):
+        return PlayRequestResult(
+            success=False,
+            track=None,
+            started=False,
+            queued=False,
+            position=None,
+            connected=False,
+            stream_ready=False,
+            message="Esta solicitud ya fue procesada.",
+        )
 
 
     # ========================================================
@@ -242,6 +261,11 @@ async def play_music_request(
         guild_id
     )
 
+    # A manual request always supersedes an in-flight recommendation.
+    from music.autoplay_recommendations import cancel_pending_autoplay
+
+    cancel_pending_autoplay(guild_id)
+
 
     async with lock:
 
@@ -284,7 +308,14 @@ async def play_music_request(
         joined_for_this_request = False
 
 
-        if not session.state.connected:
+        backend_connected = False
+        if playback_backend_manager.has_backend(guild_id):
+            try:
+                backend_connected = playback_backend_manager.get_backend(guild_id).is_connected
+            except Exception:
+                backend_connected = False
+
+        if not session.state.connected or not backend_connected:
 
             connect_result = (
                 await connect_to_voice(
@@ -379,6 +410,15 @@ async def play_music_request(
             pipeline_result.track
         )
 
+        def clear_unstarted_track() -> None:
+            if session.current_track is track:
+                session.queue.current = None
+                emit_music_state_event(
+                    guild_id,
+                    MusicStateEventType.QUEUE_CHANGED,
+                    notice="No se pudo iniciar la canción preparada.",
+                )
+
 
         if track is None:
 
@@ -466,6 +506,8 @@ async def play_music_request(
                     PlayerStatus.IDLE
                 )
 
+                clear_unstarted_track()
+
 
                 return PlayRequestResult(
                     success=False,
@@ -501,6 +543,8 @@ async def play_music_request(
                 PlayerStatus.IDLE
             )
 
+            clear_unstarted_track()
+
 
             return PlayRequestResult(
                 success=False,
@@ -534,6 +578,8 @@ async def play_music_request(
         except Exception as error:
 
             _play_failures += 1
+
+            clear_unstarted_track()
 
 
             return PlayRequestResult(
@@ -573,6 +619,8 @@ async def play_music_request(
                 PlayerStatus.IDLE
             )
 
+            clear_unstarted_track()
+
 
             return PlayRequestResult(
                 success=False,
@@ -604,6 +652,8 @@ async def play_music_request(
                 PlayerStatus.IDLE
             )
 
+            clear_unstarted_track()
+
 
             return PlayRequestResult(
                 success=False,
@@ -620,6 +670,19 @@ async def play_music_request(
                 ),
             )
 
+        if session.current_track is not track:
+            _play_failures += 1
+            return PlayRequestResult(
+                success=False,
+                track=track,
+                started=False,
+                queued=False,
+                position=0,
+                connected=session.state.connected,
+                stream_ready=True,
+                message="El stream terminó antes de que Discord pudiera estabilizarlo.",
+            )
+
 
         # ====================================================
         # SINCRONIZAR
@@ -634,6 +697,12 @@ async def play_music_request(
 
 
         _tracks_started += 1
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.TRACK_STARTED,
+            track=track,
+        )
 
 
         # ====================================================

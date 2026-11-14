@@ -140,14 +140,18 @@ class PlaybackClockManager:
         self,
         guild_id: int,
         track=None,
+        *,
+        position_seconds: int | float = 0,
     ) -> None:
 
         state = self.get_state(
             guild_id
         )
 
+        position = max(0.0, float(position_seconds))
+
         state.started_at = (
-            time.monotonic()
+            time.monotonic() - position
         )
 
         state.paused_at = None
@@ -390,9 +394,10 @@ class PlaybackClockManager:
         duration: int | None,
     ) -> str:
 
-        elapsed = self.elapsed_seconds(
-            guild_id
-        )
+        elapsed = self.elapsed_seconds(guild_id)
+
+        if duration is not None and duration > 0:
+            elapsed = min(elapsed, int(duration))
 
         elapsed_text = self.format_seconds(
             elapsed
@@ -450,6 +455,14 @@ class PlaybackClockManager:
             "track_key":
                 state.track_key,
         }
+
+    def remove(self, guild_id: int) -> bool:
+        """Forget a guild clock completely during session cleanup."""
+
+        return self._states.pop(guild_id, None) is not None
+
+    def clear(self) -> None:
+        self._states.clear()
 
 
 # ============================================================

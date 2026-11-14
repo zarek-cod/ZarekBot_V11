@@ -50,6 +50,7 @@ data/*.tmp
 *.webm
 *.exe*
 ffmpeg*
+!music/ffmpeg.py
 
 # Copias y material de trabajo local
 main_backup*.py

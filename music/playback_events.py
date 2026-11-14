@@ -18,11 +18,16 @@ NO:
 - contiene interfaz
 """
 
+import asyncio
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from collections.abc import Callable
 
 from music.track import Track
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -125,31 +130,45 @@ class PlaybackEventBus:
     # EMITIR EVENTO
     # ========================================================
 
+    def _deliver(self, event: PlaybackEvent) -> None:
+        for listener in tuple(self._listeners):
+            try:
+                listener(event)
+            except Exception:
+                logger.exception(
+                    "Playback listener failed for guild %s (%s)",
+                    event.guild_id,
+                    event.event_type.value,
+                )
+
     def emit(
         self,
         event: PlaybackEvent
     ) -> None:
-        """
-        Envía el evento a todos
-        los listeners registrados.
-        """
+        """Deliver callbacks on the main event loop, including voice-thread calls."""
 
-        for listener in list(
-            self._listeners
-        ):
+        try:
+            from music.async_scheduler import (
+                get_music_event_loop,
+                is_async_scheduler_initialized,
+            )
 
+            if not is_async_scheduler_initialized():
+                self._deliver(event)
+                return
+
+            event_loop = get_music_event_loop()
             try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
 
-                listener(
-                    event
-                )
-
-            except Exception:
-
-                # Un listener roto no debe
-                # impedir que los demás reciban
-                # el evento.
-                continue
+            if current_loop is event_loop:
+                self._deliver(event)
+            else:
+                event_loop.call_soon_threadsafe(self._deliver, event)
+        except Exception:
+            logger.exception("Could not dispatch playback event")
 
 
     # ========================================================

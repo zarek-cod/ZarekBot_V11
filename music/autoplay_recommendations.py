@@ -26,7 +26,8 @@ from music.async_scheduler import (
     is_async_scheduler_initialized,
     schedule_coroutine,
 )
-from music.auto_playback import start_prepared_track
+from music.auto_playback import _start_prepared_track_unlocked
+from music.operation_lock import get_guild_operation_lock
 from music.playback_events import (
     PlaybackEvent,
     PlaybackEventType,
@@ -79,6 +80,8 @@ _recent_titles: dict[int, deque[str]] = {}
 _recent_urls: dict[int, deque[str]] = {}
 _candidate_pools: dict[int, deque[dict]] = {}
 _guild_locks: dict[int, asyncio.Lock] = {}
+_pending_tasks: dict[int, object] = {}
+_guild_generations: dict[int, int] = {}
 
 _youtube_blocked_until = 0.0
 _youtube_block_notice_shown = False
@@ -94,6 +97,24 @@ def _get_guild_lock(guild_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         _guild_locks[guild_id] = lock
     return lock
+
+
+def _current_generation(guild_id: int) -> int:
+    return _guild_generations.get(guild_id, 0)
+
+
+def cancel_pending_autoplay(guild_id: int) -> bool:
+    """Invalidate a delayed recommendation without cancelling audio mid-start."""
+
+    _guild_generations[guild_id] = _current_generation(guild_id) + 1
+    task = _pending_tasks.get(guild_id)
+    if task is None:
+        return False
+
+    done = getattr(task, "done", None)
+    if callable(done) and done():
+        return False
+    return True
 
 
 # ============================================================
@@ -473,6 +494,8 @@ async def _refill_candidate_pool(
 async def _find_recommendation(
     guild_id: int,
     finished_track: Track,
+    *,
+    refills_remaining: int = 2,
 ) -> Track | None:
     global _recommendation_attempts
     global _recommendations_found
@@ -489,10 +512,13 @@ async def _find_recommendation(
     pool = _get_candidate_pool(guild_id)
 
     if not pool:
+        if refills_remaining <= 0:
+            return None
         await _refill_candidate_pool(
             guild_id,
             finished_track,
         )
+        refills_remaining -= 1
 
     attempts = 0
 
@@ -573,7 +599,11 @@ async def _find_recommendation(
 
     # Si el pool quedó vacío por candidatos malos,
     # hacemos UN refill adicional, no una lluvia de búsquedas.
-    if not pool and not _youtube_is_temporarily_blocked():
+    if (
+        not pool
+        and refills_remaining > 0
+        and not _youtube_is_temporarily_blocked()
+    ):
         await _refill_candidate_pool(
             guild_id,
             finished_track,
@@ -583,6 +613,7 @@ async def _find_recommendation(
             return await _find_recommendation(
                 guild_id,
                 finished_track,
+                refills_remaining=refills_remaining - 1,
             )
 
     return None
@@ -595,6 +626,8 @@ async def _find_recommendation(
 async def continue_with_autoplay(
     guild_id: int,
     finished_track: Track | None,
+    *,
+    generation: int | None = None,
 ) -> bool:
     global _tracks_started
     global _failures
@@ -607,11 +640,17 @@ async def continue_with_autoplay(
     if finished_track is None:
         return False
 
+    if generation is None:
+        generation = _current_generation(guild_id)
+
     lock = _get_guild_lock(guild_id)
 
     async with lock:
         # AutoAdvance / AutoPlayback reciben primero el evento.
         await asyncio.sleep(0.40)
+
+        if generation != _current_generation(guild_id):
+            return False
 
         session = music_session_manager.get_session(guild_id)
 
@@ -643,6 +682,9 @@ async def continue_with_autoplay(
             finished_track=finished_track,
         )
 
+        if generation != _current_generation(guild_id):
+            return False
+
         if recommendation is None:
             _failures += 1
 
@@ -654,42 +696,38 @@ async def continue_with_autoplay(
 
             return False
 
-        # Revalidar porque la búsqueda puede tardar.
-        if not session.state.autoplay_enabled:
-            return False
+        # Revalidate and claim the idle player atomically against manual PLAY,
+        # SKIP and STOP.  The generation was invalidated as soon as a manual
+        # request arrived, even if its resolver is still running.
+        async with get_guild_operation_lock(guild_id):
+            if generation != _current_generation(guild_id):
+                return False
+            if not session.state.autoplay_enabled or session.state.loop_enabled:
+                return False
+            if session.current_track is not None or session.has_pending_tracks():
+                return False
 
-        if session.state.loop_enabled:
-            return False
+            session.queue.current = recommendation
+            session.state.resume()
 
-        if session.current_track is not None:
-            return False
+            try:
+                started = await _start_prepared_track_unlocked(guild_id)
+            except Exception as error:
+                if session.current_track is recommendation:
+                    session.queue.current = None
 
-        if session.has_pending_tracks():
-            return False
+                _failures += 1
 
-        session.queue.current = recommendation
-        session.state.resume()
+                if is_youtube_antibot_error(error):
+                    _mark_youtube_blocked(error)
+                else:
+                    print(
+                        "❌ [CTX AUTOPLAY] "
+                        "No se pudo iniciar la recomendación:",
+                        type(error).__name__,
+                    )
 
-        try:
-            started = await start_prepared_track(
-                guild_id
-            )
-        except Exception as error:
-            if session.current_track is recommendation:
-                session.queue.current = None
-
-            _failures += 1
-
-            if is_youtube_antibot_error(error):
-                _mark_youtube_blocked(error)
-            else:
-                print(
-                    "❌ [CTX AUTOPLAY] "
-                    "No se pudo iniciar la recomendación:",
-                    type(error).__name__,
-                )
-
-            return False
+                return False
 
         if not started:
             if session.current_track is recommendation:
@@ -745,12 +783,22 @@ def handle_autoplay_recommendation_event(
         return
 
     try:
-        schedule_coroutine(
+        cancel_pending_autoplay(event.guild_id)
+        generation = _current_generation(event.guild_id)
+        task = schedule_coroutine(
             continue_with_autoplay(
                 guild_id=event.guild_id,
                 finished_track=event.track,
+                generation=generation,
             )
         )
+        _pending_tasks[event.guild_id] = task
+
+        def _remove_finished(completed) -> None:
+            if _pending_tasks.get(event.guild_id) is completed:
+                _pending_tasks.pop(event.guild_id, None)
+
+        task.add_done_callback(_remove_finished)
     except RuntimeError:
         return
 
@@ -781,6 +829,13 @@ def unregister_autoplay_recommendations() -> None:
     playback_event_bus.unsubscribe(
         handle_autoplay_recommendation_event
     )
+
+    for guild_id in tuple(_pending_tasks):
+        task = _pending_tasks.pop(guild_id)
+        cancel = getattr(task, "cancel", None)
+        if callable(cancel):
+            cancel()
+        _guild_generations[guild_id] = _current_generation(guild_id) + 1
 
     _registered = False
 
@@ -813,6 +868,7 @@ def get_autoplay_recommendations_summary() -> dict:
         "skipped_current_track": _skipped_current_track,
         "recent_history_size": RECENT_HISTORY_SIZE,
         "candidate_pool_size": CANDIDATE_POOL_SIZE,
+        "pending_tasks": len(_pending_tasks),
         "real_recommendations": True,
         "loop_priority": True,
         "manual_queue_priority": True,

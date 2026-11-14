@@ -30,12 +30,18 @@ from music.player import (
     PlayerStatus,
     music_player_manager,
 )
+from music.operation_lock import get_guild_operation_lock
+from music.audio_priority import register_terminal_operation_during_tts
 
 from music.session import (
     music_session_manager,
 )
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -70,9 +76,7 @@ def _get_stop_lock(
 
     if guild_id not in _stop_locks:
 
-        _stop_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _stop_locks[guild_id] = get_guild_operation_lock(guild_id)
 
     return _stop_locks[
         guild_id
@@ -96,6 +100,12 @@ async def stop_music(
     clear_queue=False:
         conserva la cola.
     """
+
+    register_terminal_operation_during_tts(guild_id)
+
+    from music.autoplay_recommendations import cancel_pending_autoplay
+
+    cancel_pending_autoplay(guild_id)
 
     lock = _get_stop_lock(
         guild_id
@@ -249,12 +259,24 @@ async def stop_music(
             )
 
 
-        return StopResult(
+        result = StopResult(
             success=True,
             stopped_track=stopped_track,
             queue_cleared=clear_queue,
             message=message,
         )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.STOPPED,
+            track=stopped_track,
+        )
+        if clear_queue:
+            emit_music_state_event(
+                guild_id,
+                MusicStateEventType.QUEUE_CHANGED,
+            )
+        return result
 
 
 # ============================================================

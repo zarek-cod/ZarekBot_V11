@@ -28,12 +28,17 @@ from music.player import (
     PlayerStatus,
     music_player_manager,
 )
+from music.operation_lock import get_guild_operation_lock
 
 from music.session import (
     music_session_manager,
 )
 
 from music.track import Track
+from music.state_events import (
+    MusicStateEventType,
+    emit_music_state_event,
+)
 
 
 # ============================================================
@@ -75,9 +80,7 @@ def _get_pause_lock(
 
     if guild_id not in _pause_locks:
 
-        _pause_locks[
-            guild_id
-        ] = asyncio.Lock()
+        _pause_locks[guild_id] = get_guild_operation_lock(guild_id)
 
 
     return _pause_locks[
@@ -238,6 +241,12 @@ async def pause_current_track(
 
         player.status = (
             PlayerStatus.PAUSED
+        )
+
+        emit_music_state_event(
+            guild_id,
+            MusicStateEventType.PAUSED,
+            track=track,
         )
 
 
