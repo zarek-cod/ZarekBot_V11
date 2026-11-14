@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import time
+import warnings
 from types import SimpleNamespace
 
 import discord
@@ -247,6 +250,102 @@ async def test_state_event_refreshes_the_existing_panel(monkeypatch, tmp_path):
 
     assert len(rendered) == 1
     assert "Automatic Update" in rendered[0].track_block
+
+
+@pytest.mark.asyncio
+async def test_refresh_button_does_not_override_discord_internal_refresh(monkeypatch):
+    guild_id = 12014
+    view = CTXMusicView(guild_id)
+    refreshes = []
+
+    async def refresh_coalesced(requested_guild_id, *, notice=None):
+        refreshes.append((requested_guild_id, notice))
+        return True
+
+    monkeypatch.setattr(
+        panel_module.panel_registry, "refresh_coalesced", refresh_coalesced
+    )
+
+    class FakeResponse:
+        def __init__(self):
+            self.deferred = False
+
+        async def defer(self):
+            self.deferred = True
+
+    response = FakeResponse()
+    interaction = SimpleNamespace(response=response, message=None)
+    refresh_button = button_map(view)["ctx_music:refresh"]
+
+    assert refresh_button.callback.__name__ == "_on_refresh_button"
+    await refresh_button.callback(interaction)
+    assert response.deferred
+    assert refreshes == [(guild_id, "Panel sincronizado.")]
+
+    own_methods = {
+        name
+        for name, value in CTXMusicView.__dict__.items()
+        if inspect.isfunction(value)
+    }
+    inherited_methods = {
+        name
+        for base in CTXMusicView.__mro__[1:]
+        for name, value in base.__dict__.items()
+        if inspect.isfunction(value)
+    }
+    private_collisions = {
+        name
+        for name in own_methods & inherited_methods
+        if name.startswith("_") and not name.startswith("__")
+    }
+    assert private_collisions == set()
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        result = view._refresh([])
+    assert result is None
+    assert not inspect.isawaitable(result)
+    assert not any("was never awaited" in str(item.message) for item in captured)
+
+
+@pytest.mark.asyncio
+async def test_panel_refresh_burst_is_coalesced_and_rate_limited(
+    monkeypatch, tmp_path
+):
+    guild_id = 12015
+    monkeypatch.setattr(panel_module, "PANEL_STORE", tmp_path / "panels.json")
+    monkeypatch.setattr(panel_module, "PANEL_DEBOUNCE_SECONDS", 0.01)
+    monkeypatch.setattr(panel_module, "PANEL_MIN_EDIT_INTERVAL_SECONDS", 0.03)
+    registry = MusicPanelRegistry()
+    registry._save = lambda: None
+    registry.references[guild_id] = PanelReference(guild_id, 88, 99)
+    rendered = []
+
+    class FakeMessage:
+        flags = SimpleNamespace(components_v2=True)
+
+        async def edit(self, **kwargs):
+            rendered.append((time.monotonic(), kwargs["view"].presentation))
+            return self
+
+    registry._messages[guild_id] = FakeMessage()
+    started_at = time.monotonic()
+    registry._last_edits[guild_id] = started_at
+
+    for notice in ("first", "second", "latest"):
+        registry.on_state_event(
+            MusicStateEvent(
+                guild_id,
+                MusicStateEventType.QUEUE_CHANGED,
+                notice=notice,
+            )
+        )
+
+    task = registry._pending_updates[guild_id]
+    assert await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+    assert len(rendered) == 1
+    assert rendered[0][0] - started_at >= 0.025
+    assert "latest" in rendered[0][1].notice_block
 
 
 def test_play_confirmation_is_compact_and_links_the_single_panel():

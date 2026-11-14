@@ -52,9 +52,12 @@ Al recuperar un panel antiguo, CTX lo convierte una sola vez eliminando su embed
 y conservando el mismo mensaje. El negro depende del tema oscuro del cliente;
 Discord no permite fijar un color de fondo arbitrario.
 
-Los cambios se agrupan con debounce. Mientras una canción avanza, el panel se
-edita cada 15 segundos; no se edita cada segundo para evitar rate limits. Los
-intervalos pueden ajustarse con `CTX_MUSIC_PANEL_DEBOUNCE_SECONDS` y
+Los cambios se agrupan con debounce y se coalescen por servidor. Todas las
+actualizaciones automáticas y de botones comparten un intervalo mínimo entre
+ediciones. Mientras una canción avanza, el panel solicita una actualización cada
+15 segundos; no se edita cada segundo para evitar rate limits. Los intervalos
+pueden ajustarse con `CTX_MUSIC_PANEL_DEBOUNCE_SECONDS`,
+`CTX_MUSIC_PANEL_MIN_EDIT_INTERVAL_SECONDS` y
 `CTX_MUSIC_PANEL_REFRESH_SECONDS`, dentro de límites seguros.
 
 ## Permisos

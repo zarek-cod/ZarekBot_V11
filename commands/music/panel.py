@@ -47,6 +47,9 @@ def _env_seconds(name: str, default: float, minimum: float, maximum: float) -> f
 PANEL_DEBOUNCE_SECONDS = _env_seconds(
     "CTX_MUSIC_PANEL_DEBOUNCE_SECONDS", 1.5, 0.5, 5.0
 )
+PANEL_MIN_EDIT_INTERVAL_SECONDS = _env_seconds(
+    "CTX_MUSIC_PANEL_MIN_EDIT_INTERVAL_SECONDS", 2.5, 1.0, 10.0
+)
 PROGRESS_REFRESH_SECONDS = _env_seconds(
     "CTX_MUSIC_PANEL_REFRESH_SECONDS", 15.0, 10.0, 60.0
 )
@@ -294,6 +297,7 @@ class MusicPanelRegistry:
         self._messages: dict[int, discord.Message] = {}
         self._pending_updates: dict[int, asyncio.Task] = {}
         self._pending_notices: dict[int, str | None] = {}
+        self._pending_requested_at: dict[int, float] = {}
         self._last_edits: dict[int, float] = {}
         self._panel_locks: dict[int, asyncio.Lock] = {}
         self._progress_task: asyncio.Task | None = None
@@ -436,37 +440,78 @@ class MusicPanelRegistry:
                 logger.warning("Could not refresh music panel for guild %s", guild_id)
                 return False
 
-    def on_state_event(self, event: MusicStateEvent) -> None:
-        if event.guild_id not in self.references:
-            return
-        self._pending_notices[event.guild_id] = event.notice
-        existing = self._pending_updates.get(event.guild_id)
+    async def _run_pending_updates(self, guild_id: int) -> bool:
+        """Render the newest state after event bursts without exceeding edit pace."""
+
+        updated = False
+        while guild_id in self._pending_requested_at:
+            requested_at = self._pending_requested_at[guild_id]
+            edit_due_at = max(
+                requested_at + PANEL_DEBOUNCE_SECONDS,
+                self._last_edits.get(guild_id, 0.0)
+                + PANEL_MIN_EDIT_INTERVAL_SECONDS,
+            )
+            delay = edit_due_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            # A newer request arrived while sleeping; restart the debounce window.
+            if self._pending_requested_at.get(guild_id) != requested_at:
+                continue
+
+            notice = self._pending_notices.pop(guild_id, None)
+            self._pending_requested_at.pop(guild_id, None)
+            updated = await self.refresh(guild_id, notice=notice) or updated
+
+        return updated
+
+    def _start_pending_update(self, guild_id: int) -> asyncio.Task:
+        existing = self._pending_updates.get(guild_id)
         if existing is not None and not existing.done():
-            return
+            return existing
 
-        async def delayed_refresh() -> None:
-            elapsed = time.monotonic() - self._last_edits.get(event.guild_id, 0.0)
-            await asyncio.sleep(max(0.0, PANEL_DEBOUNCE_SECONDS - elapsed))
-            notice = self._pending_notices.pop(event.guild_id, None)
-            await self.refresh(event.guild_id, notice=notice)
-
-        task = asyncio.create_task(delayed_refresh())
-        self._pending_updates[event.guild_id] = task
+        task = asyncio.create_task(self._run_pending_updates(guild_id))
+        self._pending_updates[guild_id] = task
 
         def remove_finished(completed: asyncio.Task) -> None:
-            if self._pending_updates.get(event.guild_id) is completed:
-                self._pending_updates.pop(event.guild_id, None)
-            if completed.cancelled():
-                return
-            error = completed.exception()
-            if error is not None:
-                logger.error(
-                    "Deferred music panel refresh failed for guild %s",
-                    event.guild_id,
-                    exc_info=error,
-                )
+            if self._pending_updates.get(guild_id) is completed:
+                self._pending_updates.pop(guild_id, None)
+            if not completed.cancelled():
+                error = completed.exception()
+                if error is not None:
+                    logger.error(
+                        "Deferred music panel refresh failed for guild %s",
+                        guild_id,
+                        exc_info=error,
+                    )
+            # Do not lose an event that arrived as the previous task completed.
+            if guild_id in self._pending_requested_at:
+                self._start_pending_update(guild_id)
 
         task.add_done_callback(remove_finished)
+        return task
+
+    def schedule_refresh(
+        self, guild_id: int, *, notice: str | None = None
+    ) -> asyncio.Task | None:
+        """Coalesce a refresh request into the single per-guild update worker."""
+
+        if guild_id not in self.references:
+            return None
+        self._pending_notices[guild_id] = notice
+        self._pending_requested_at[guild_id] = time.monotonic()
+        return self._start_pending_update(guild_id)
+
+    async def refresh_coalesced(
+        self, guild_id: int, *, notice: str | None = None
+    ) -> bool:
+        task = self.schedule_refresh(guild_id, notice=notice)
+        if task is None:
+            return False
+        return bool(await asyncio.shield(task))
+
+    def on_state_event(self, event: MusicStateEvent) -> None:
+        self.schedule_refresh(event.guild_id, notice=event.notice)
 
     def start_progress_updates(self) -> None:
         if self._progress_task is not None and not self._progress_task.done():
@@ -480,18 +525,8 @@ class MusicPanelRegistry:
                     for guild_id in tuple(self.references)
                     if playback_clock_manager.get_state(guild_id).running
                 ]
-                if active_guilds:
-                    results = await asyncio.gather(
-                        *(self.refresh(guild_id) for guild_id in active_guilds),
-                        return_exceptions=True,
-                    )
-                    for guild_id, result in zip(active_guilds, results):
-                        if isinstance(result, BaseException):
-                            logger.error(
-                                "Progress refresh failed for guild %s",
-                                guild_id,
-                                exc_info=result,
-                            )
+                for guild_id in active_guilds:
+                    self.schedule_refresh(guild_id)
 
         self._progress_task = asyncio.create_task(progress_loop())
 
@@ -500,6 +535,7 @@ class MusicPanelRegistry:
             task.cancel()
         self._pending_updates.clear()
         self._pending_notices.clear()
+        self._pending_requested_at.clear()
         if self._progress_task is not None:
             self._progress_task.cancel()
             self._progress_task = None
@@ -625,7 +661,7 @@ class CTXMusicView(discord.ui.LayoutView):
             label="Actualizar",
             custom_id="ctx_music:refresh",
             style=discord.ButtonStyle.secondary,
-            callback=self._refresh,
+            callback=self._on_refresh_button,
         )
 
     def _build_layout(self) -> None:
@@ -704,7 +740,9 @@ class CTXMusicView(discord.ui.LayoutView):
     async def _finish_action(
         self, interaction: discord.Interaction, notice: str
     ) -> None:
-        updated = await panel_registry.refresh(self.guild_id, notice=notice)
+        updated = await panel_registry.refresh_coalesced(
+            self.guild_id, notice=notice
+        )
         if not updated and interaction.message is not None:
             await _edit_panel_message(
                 interaction.message, self.guild_id, notice=notice
@@ -794,7 +832,7 @@ class CTXMusicView(discord.ui.LayoutView):
             ephemeral=True,
         )
 
-    async def _refresh(self, interaction: discord.Interaction) -> None:
+    async def _on_refresh_button(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer()
         await self._finish_action(interaction, "Panel sincronizado.")
 
@@ -890,5 +928,6 @@ def get_music_panel_summary() -> dict:
         "one_panel_per_guild": True,
         "state_driven_controls": True,
         "debounce_seconds": PANEL_DEBOUNCE_SECONDS,
+        "min_edit_interval_seconds": PANEL_MIN_EDIT_INTERVAL_SECONDS,
         "progress_refresh_seconds": PROGRESS_REFRESH_SECONDS,
     }
